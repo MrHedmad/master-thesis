@@ -1,0 +1,200 @@
+\begin{table}
+	\centering
+	\begin{tabular}{|c|c|c|c|}
+		\hline
+		\textbf{﻿#} & \textbf{Name} & \textbf{Description} & \textbf{PMID} \\
+		\hline\hline
+		1 & InsiderPPI & Number of protein interactions for the amino acid site of a mutation based on Interactome Insider & 29355848 \\
+		\hline
+		2 & num\_dup\_genes & Number of tandem duplicate genes from the Duplicate Gene Database & 23209799 \\
+		\hline
+		3 & replication\_time & Replication time & 23770567 \\
+		\hline
+		4 & HiC\_compartment & HiC compartment value & 23770567 \\
+		\hline
+		5 & gene.length & Coding DNA sequence length of gene &  \\
+		\hline
+		6 & HotMAPS 1D (w=0) & P-value of missense mutation hotspot detection by HotMAPS 1D while considering only the site of the mutated amino acid residue & 27197156 \\
+		\hline
+		7 & HotMAPS 1D (w=5) & P-value of missense mutation hotspot detection by HotMAPS 1D while aslo considering 5 flanking residues on either side of the site of the mutated amino acid residue & 27197156 \\
+		\hline
+		8 & HotMAPS 1D (w=10) & P-value of missense mutation hotspot detection by HotMAPS 1D while also considering 10 flanking residues on either side of the site of the mutated amino acid residue & 27197156 \\
+		\hline
+		9 & NumAlignedSpecies & Number of species with an aligned amino acid at the mutated amino acid residue in the Multiz-100-way alignment &  \\
+		\hline
+		10 & UniprotDensity & Density of Uniprot annotations within the same exon of the queried mutation &  \\
+		\hline
+		11 & AABLOSUM & Amino acid substitution score from the BLOSUM 62 matrix & 21685053 \\
+		\hline
+		12 & AACharge & The change in formal charge resulting from replacing the reference amino acid residue with the mutation. Histidine is assumed protonated (formal charge of +1) & 21685053 \\
+		\hline
+		13 & AACOSMIC & Ln(frequency) of missense change type (amino acid type X to amino acid type Y &  e.g. ALANINE to GLYCINE) in COSMIC (release 38) & 21685053 \\
+		\hline
+		14 & AACOSMICvsHapMap & Ln(frequency) of missense change in COSMIC (release 38) normalized by the number of times the change type was observed in HapMap validated SNPs in dbSNP Build 129 & 21685053 \\
+		\hline
+		15 & AACOSMICvsSWISSPROT & Ln(frequency) of missense change in COSMIC (release 38) normalized by the frequency of reference amino acid residue in human proteins in SwissProt/TrEMBL & 21685053 \\
+		\hline
+		16 & AAEx & Amino acid substitution score from the EX matrix. & 21685053 \\
+		\hline
+		17 & AAGrantham & The Grantham distance from reference to mutation amino acid residue. & 21685053 \\
+		\hline
+		18 & AAHapMap & Ln(frequency) of missense change type in HapMap validated SNPs in dbSNP Build 129 & 21685053 \\
+		\hline
+		19 & AAHGMD2003 & Number of times that the reference to mutation substitution occurs in the Human Gene Mutation Database &  2003 version & 21685053 \\
+		\hline
+		20 & AAHydrophobicity & The change in hydrophobicity resulting from the substitution. & 21685053 \\
+		\hline
+		21 & AAMJ & Amino acid substitution score from the Miyazawa-Jernigan contact energy matrix & 21685053 \\
+		\hline
+		22 & AAPAM250 & Amino acid substitution score from the PAM250 matrix. & 21685053 \\
+		\hline
+		23 & AAPolarity & Polarity change from reference to mutation amino acid residue & 21685053 \\
+		\hline
+		24 & AATransition & Frequency of transition between two neighboring amino acids based on all human proteins in SwissProt/TrEMBL & 21685053 \\
+		\hline
+		25 & AAVB & Amino acid substitution score from the VB (Venkatarajan and Braun) matrix & 21685053 \\
+		\hline
+		26 & AAVolume & The change in residue volume resulting from the replacement (in units of cubic Angstroms) & 21685053 \\
+		\hline
+		27 & MGAEntropy & The Shannon entropy calculated for the column of the Multiz-100-way alignment &  corresponding to the location of the mutation & 21685053 \\
+		\hline
+		28 & MGAPHC & Calculated based on the degree of conservation of the residue &  the mutation and the most probable amino acid in the column of a Multiz-100-way alignment from UCSC Human Genome Browser hg38. & 21685053 \\
+		\hline
+		29 & MGARelEntropy & Kullback-Leibler divergence calculated for the column of Multiz-100-way alignment (corresponding to the location of the mutation) and that of a background distribution of amino acid residues computed from a large sample of multiple sequence alignments. & 21685053 \\
+		\hline
+		30 & HMMEntropy & The Shannon entropy calculated for the column of the SAM-T2K multiple sequence alignment &  corresponding to the location of the mutation. & 21685053 \\
+		\hline
+		31 & HMMPHC & Calculated based on the degree of conservation of the residue &  the mutation and the most probable amino acid in a match state of a hidden Markov model built with SAM-T2K software. & 21685053 \\
+		\hline
+		32 & HMMRelEntropy & Kullback-Leibler Divergence calculated for the column of the SAM-T2K multiple sequence alignment (corresponding to the location of the mutation) and that of a background distribution of amino acid residues computed from a large sample of multiple sequence alignments & 21685053 \\
+		\hline
+		33 & ExonConservation & The conservation score for the entire exon calculated from a 100- species phylogenetic alignment using the UCSC Genome Browser (hg38). Scores are given for windows of nucleotides. We retrieve the scores for each region that overlaps the exon in which the base substitution occurred and calculated a weighted average of the conservation scores where the weight is the number of bases with a particular score. & 21685053 \\
+		\hline
+		34 & ExonHapMapSnpDensity & The number of HapMap verified SNPs (dbSNP build 131) in the exon where the mutation is located divided by the length of the exon & 21685053 \\
+		\hline
+		35 & ExonSnpDensity & The number of SNPs in the exon where the mutation is located divided by the length of the exon & 21685053 \\
+		\hline
+		36 & PredBFactorF & These features consist of the probability that the wild type residue backbone is stiff &  intermediate or flexible. & 21685053 \\
+		\hline
+		37 & PredBFactorM &  & 21685053 \\
+		\hline
+		38 & PredBFactorS &  & 21685053 \\
+		\hline
+		39 & PredRSAB & These features consist of the probability of the wild type accessibility residue being buried &  intermediate or exposed. & 21685053 \\
+		\hline
+		40 & PredRSAE &  & 21685053 \\
+		\hline
+		41 & PredRSAI &  & 21685053 \\
+		\hline
+		42 & PredSSC & These features consist of the probability that the secondary structure of the region in which the wild type residue exists is helix &  loop or strand. & 21685053 \\
+		\hline
+		43 & PredSSE &  & 21685053 \\
+		\hline
+		44 & PredSSH &  & 21685053 \\
+		\hline
+		45 & PredStabilityH & These features consist of the probability that the wild stability type residue contributes to overall protein stability in a manner that is highly stabilizing &  average or destabilizing &  Stability estimates for the neural network training data were calculated using the FoldX force field & 21685053 \\
+		\hline
+		46 & PredStabilityL &  & 21685053 \\
+		\hline
+		47 & PredStabilityM &  & 21685053 \\
+		\hline
+		48 & RegCompC & Proportion of Cysteines around position. & 21685053 \\
+		\hline
+		49 & RegCompDE & Proportion of Aspartic and Glutamic Acids around position & 21685053 \\
+		\hline
+		50 & RegCompEntropy & Shannon entropy of amino acid residues around position. & 21685053 \\
+		\hline
+		51 & RegCompG & Proportion of Glycines around position. & 21685053 \\
+		\hline
+		52 & RegCompH & Proportion of Histidines around position. & 21685053 \\
+		\hline
+		53 & RegCompILVM & Proportion of Isoleucines &  Leucines &  Valines &  and Methionines around position. & 21685053 \\
+		\hline
+		54 & RegCompKR & Proportion of Lysines and Arginines around position & 21685053 \\
+		\hline
+		55 & RegCompNormEntropy & Shannon entropy of amino acid residues around position normalized by the number of different amino acids within the window. & 21685053 \\
+		\hline
+		56 & RegCompP & Proportion of Prolines around position. & 21685053 \\
+		\hline
+		57 & RegCompQ & Proportion of Glutamines around position. & 21685053 \\
+		\hline
+		58 & RegCompWYF & Proportion of Tryptophans &  Tyrosines &  and Phenylalanines around position & 21685053 \\
+		\hline
+		59 & AATripletFirstProbMut & Probability of seeing the amino acid in position 1 of a triplet & 21685053 \\
+		\hline
+		60 & AATripletFirstProbWild & Probability of seeing the amino acid in position 1 of a triplet & 21685053 \\
+		\hline
+		61 & AATripletSecondProbMut & Probability of seeing the amino acid in position 2 of a triplet & 21685053 \\
+		\hline
+		62 & AATripletSecondProbWild & Probability of seeing the amino acid in position 2 of a triplet & 21685053 \\
+		\hline
+		63 & AATripletThirdProbMut & Probability of seeing the amino acid in position 3 of a triplet & 21685053 \\
+		\hline
+		64 & AATripletThirdProbWild & Probability of seeing the amino acid in position 3 of a triplet & 21685053 \\
+		\hline
+		65 & AATripletFirstDiffProb & Difference in probability of occurrence of reference and mutation amino acid residue in the 1st position. & 21685053 \\
+		\hline
+		66 & AATripletSecondDiffProb & Difference in probability of occurrence of reference and mutation amino acid residue in the 2nd position. & 21685053 \\
+		\hline
+		67 & AATripletThirdDiffProb & Difference in probability of occurrence of reference and mutation amino acid residue in the 3rd position. & 21685053 \\
+		\hline
+		68 & UniprotACTSITE & Sites involved in enzymatic activity & 21685053 \\
+		\hline
+		69 & UniprotBINDING & Binding sites & 21685053 \\
+		\hline
+		70 & UniprotCABIND & Calcium binding site & 21685053 \\
+		\hline
+		71 & UniprotCARBOHYD & Carbohydrate binding site & 21685053 \\
+		\hline
+		72 & UniprotCOMPBIAS & Compositionally biased region & 21685053 \\
+		\hline
+		73 & UniprotDISULFID & Site of disulfide bond & 21685053 \\
+		\hline
+		74 & UniprotDNABIND & DNA binding site & 21685053 \\
+		\hline
+		75 & UniprotDOM\_Chrom & Site in a domain involved in chromatin structure remodeling & 21685053 \\
+		\hline
+		76 & UniprotDOM\_LOC & Site in a domain that determines correct cellular localization of a protein & 21685053 \\
+		\hline
+		77 & UniprotDOM\_MMBRBD & Site in a domain that binds to the cell membrane & 21685053 \\
+		\hline
+		78 & UniprotDOM\_PostModEnz & Site in an enzymatic domain responsible for any kind of post-translational modification & 21685053 \\
+		\hline
+		79 & UniprotDOM\_PostModRec & Site in a domain that recognizes a posttranslationally modified residue & 21685053 \\
+		\hline
+		80 & UniprotDOM\_PPI & Site in a protein-protein interaction domain & 21685053 \\
+		\hline
+		81 & UniprotDOM\_RNABD & Site in an RNA binding domain & 21685053 \\
+		\hline
+		82 & UniprotDOM\_TF & Site in a transcription factor doman & 21685053 \\
+		\hline
+		83 & UniprotLIPID & Lipid binding site & 21685053 \\
+		\hline
+		84 & UniprotMETAL & Metal binding site & 21685053 \\
+		\hline
+		85 & UniprotMODRES & Site of modified residue & 21685053 \\
+		\hline
+		86 & UniprotMOTIF & Site of known functional motif & 21685053 \\
+		\hline
+		87 & UniprotNPBIND & Nucleotide phosphatebinding region & 21685053 \\
+		\hline
+		88 & UniprotPROPEP & Site in the propeptide (cleaved in mature protein) & 21685053 \\
+		\hline
+		89 & UniprotREGIONS & Region of interest in the protein sequence & 21685053 \\
+		\hline
+		90 & UniprotREP & Repeat region & 21685053 \\
+		\hline
+		91 & UniprotSECYS & Site of a selenocystein & 21685053 \\
+		\hline
+		92 & UniprotSIGNAL & Site of localization signal (protein targeted to secretory pathway or periplasm) & 21685053 \\
+		\hline
+		93 & UniprotSITE & An interesting amino acid site in the protein sequence & 21685053 \\
+		\hline
+		94 & UniprotTRANSMEM & Transmembrane region & 21685053 \\
+		\hline
+		95 & UniprotZNFINGER & Site in a zinc finger & 21685053 \\
+		\hline
+			\end{tabular}
+	\label{tab:}
+	\caption{}
+\end{table}

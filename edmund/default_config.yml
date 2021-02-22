@@ -1,0 +1,14 @@
+# DO NOT CHANGE THIS FILE - Use it only for the defaults
+# The config.yml file overrides the contents of this file here.
+
+# >> Set the path for the logs.
+# Additional logs are created alongside the main one during runtime.
+logs:
+  path: "./logs/edmund.log"
+  # Levels can be 50 - CRITICAL, 40 - ERROR, 30 - WARNING, 20 - INFO,
+  # 10 - DEBUG or some other int. Log messages of level equal or above the
+  # specified will be logged.
+  file_level: 20
+  stdout_level: 30
+# >> Should we show loading bars?
+show_loading: True

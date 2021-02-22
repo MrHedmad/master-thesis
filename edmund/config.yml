@@ -1,0 +1,5 @@
+logs:
+  file_level: 20
+  path: ./logs/edmund.log
+  stdout_level: 30
+show_loading: true

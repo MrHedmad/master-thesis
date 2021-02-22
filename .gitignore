@@ -127,3 +127,14 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Vscode Junk
+.vscode/
+
+# Symlinks
+fastdata
+
+# Other junk
+/logs
+ed
+runtests
