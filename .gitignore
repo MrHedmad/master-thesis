@@ -177,6 +177,11 @@ docs/
 # translation temp files
 po/*~
 
+# R project files
+*.Rproj
+
+# HTML Rmarkdown renderings
+*.html
 
 ## Other
 # Vscode Junk
