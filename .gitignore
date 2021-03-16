@@ -194,3 +194,5 @@ fastdata
 /logs
 ed
 runtests
+*.back # This is glmulti stuff
+*.pdf # This is knitted results
