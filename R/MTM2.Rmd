@@ -1,0 +1,967 @@
+---
+title: Multi Tumor Modelling 2
+output:
+  pdf_document: default
+  html_notebook:
+    code_folding: none
+  html_document:
+    df_print: paged
+---
+
+We build onto what we determined before.
+
+Load packages and data:
+
+```{r}
+library(plyr)
+library(tidyverse)
+library(leaps)
+library(reshape2)
+library(glmulti)
+library(ggfortify)
+library(MASS)
+```
+
+```{r}
+# The data comes from data_preprocessing.R
+load(file = "F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data.RData")
+p.names <- names(projects)
+models <- list()
+model.data <- list()
+
+for (name in p.names) {
+  models[[name]] <- list()
+}
+```
+
+# Model data preprocessing
+
+First I need to crop the data at the 90th percentile for passenger mutations, or the models will be hevily distorted:
+
+```{r}
+crop.at <- function(clinical.data, percentile = 90) {
+  # Crops the data at the 90th percentile for passenger mutations
+  return(subset(clinical.data, clinical.data$passenger.freq < quantile(clinical.data$passenger.freq, percentile / 100)))
+}
+
+for (name in p.names) {
+  model.data <- projects
+  model.data[[name]]$clinical %>% crop.at(90) -> model.data[[name]]$clinical
+}
+```
+
+Now I need to remove some types of levels from the data, otherwise there are too many of them. I also declare which variables are of interest. As far as I can tell, the clinical scores "overwrite" the pathologic ones if they are present.
+
+```{r}
+# Vector of variables that we think are of interest:
+selected.vars <- c("gender", "vital_status", "age_at_diagnosis", "icd_10_code", "prior_malignancy", "alcohol_history", "bmi", "ajcc_clinical_m", "ajcc_clinical_n", "ajcc_clinical_t", "ajcc_clinical_stage", "ajcc_pathologic_m", "ajcc_pathologic_n", "ajcc_pathologic_t", "ajcc_pathologic_stage")
+tumor.spec.vars <- c("ann_arbor_b_symptoms", "figo_stage", "masaoka_stage", "primary_gleason_grade", "secondary_gleason_grade")
+
+all.vars <- c(selected.vars, tumor.spec.vars)
+
+all.factors <- all.vars[!all.vars %in% c("age_at_diagnosis", "bmi")]
+
+for (name in p.names) {
+  collnamess <- names(model.data[[name]]$clinical)
+  for (colname in collnamess) {
+    if (colname %in% all.factors) {
+      model.data[[name]]$clinical[[colname]] <- as.factor(model.data[[name]]$clinical[[colname]])
+    }
+    # Clinical ajcc scores considerations:
+    # The scores are too precise to work well as model factors, so I simplify them here
+    # into low-grade tumors and high grade tumors.
+    if (colname == "ajcc_clinical_m") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "M0" = "M0",
+        "M1" = "M1",
+        "M1a" = "M1",
+        "M1b" = "M1",
+        "M1c" = "M1",
+        "MX" = "MX",
+        "cM0 (i+)" = "M0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_n") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "N0" = "N0",
+        "N0 (i+)" = "N0",
+        "N0 (i-)" = "N0",
+        "N0 (mol+)" = "N0",
+        "N0 (mol-)" = "N0",
+        "N1" = "N1",
+        "N1a" = "N1",
+        "N1b" = "N1",
+        "N1bI" = "N1",
+        "N1bII" = "N1",
+        "N1bIII" = "N1",
+        "N1bIV" = "N1",
+        "N1c" = "N1",
+        "N1mi" = "N1",
+        "N2" = "N2+",
+        "N2a" = "N2+",
+        "N2b" = "N2+",
+        "N2c" = "N2+",
+        "N3" = "N2+",
+        "N3a" = "N2+",
+        "N3b" = "N2+",
+        "N3c" = "N2+",
+        "N4" = "N2+",
+        "NX" = "NX",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage 0a" = "Stage0",
+        "Stage 0is" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IA3" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage IIC1" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IS" = "Stage1",
+        "Stage IV" = "Stage1",
+        "Stage IVA" = "Stage1",
+        "Stage IVB" = "Stage1",
+        "Stage IVC" = "Stage1",
+        "Stage Tis" = "Stage0", # Small mutated cells - some do not consider this as cancer
+        "Stage X" = "Stage X",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_t") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "T0" = "T0",
+        "T1" = "T1",
+        "T1a" = "T1",
+        "T1a1" = "T1",
+        "T1a2" = "T1",
+        "T1b" = "T1",
+        "T1b1" = "T1",
+        "T1b2" = "T1",
+        "T1c" = "T1",
+        "T1mi" = "T1",
+        "T2" = "T2",
+        "T2a" = "T2",
+        "T2a1" = "T2",
+        "T2a2" = "T2",
+        "T2b" = "T2",
+        "T2c" = "T2",
+        "T2d" = "T2",
+        "T3" = "T3+",
+        "T3a" = "T3+",
+        "T3b" = "T3+",
+        "T3c" = "T3+",
+        "T3d" = "T3+",
+        "T4" = "T3+",
+        "T4a" = "T3+",
+        "T4b" = "T3+",
+        "T4c" = "T3+",
+        "T4d" = "T3+",
+        "T4e" = "T3+",
+        "TX" = "TX",
+        "Ta" = "T1",
+        "Tis" = "T0",
+        "Tis (DCIS)" = "T0",
+        "Tis (LCIS)" = "T0",
+        "Tis (Paget's)" = "T0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_m") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "M0" = "M0",
+        "M1" = "M1",
+        "M1a" = "M1",
+        "M1b" = "M1",
+        "M1c" = "M1",
+        "M1d" = "M1",
+        "M2" = "M2",
+        "MX" = "MX",
+        "cM0 (i+)" = "M0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_n") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "N0" = "N0",
+        "N0 (i+)" = "N0",
+        "N0 (i-)" = "N0",
+        "N0 (mol+)" = "N0",
+        "N0 (mol-)" = "N0",
+        "N1" = "N1",
+        "N1a" = "N1",
+        "N1b" = "N1",
+        "N1bI" = "N1",
+        "N1bII" = "N1",
+        "N1bIII" = "N1",
+        "N1bIV" = "N1",
+        "N1c" = "N1",
+        "N1mi" = "N1",
+        "N2" = "N2+",
+        "N2a" = "N2+",
+        "N2b" = "N2+",
+        "N2c" = "N2+",
+        "N3" = "N2+",
+        "N3a" = "N2+",
+        "N3b" = "N2+",
+        "N3c" = "N2+",
+        "N4" = "N2+",
+        "NX" = "NX",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage 0a" = "Stage0",
+        "Stage 0is" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IA3" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage IIC1" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IS" = "Stage1",
+        "Stage IV" = "Stage1",
+        "Stage IVA" = "Stage1",
+        "Stage IVB" = "Stage1",
+        "Stage IVC" = "Stage1",
+        "Stage Tis" = "Stage0", # Small mutated cells - some do not consider this as cancer
+        "Stage X" = "Stage X",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_t") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "T0" = "T0",
+        "T1" = "T1",
+        "T1a" = "T1",
+        "T1a1" = "T1",
+        "T1a2" = "T1",
+        "T1b" = "T1",
+        "T1b1" = "T1",
+        "T1b2" = "T1",
+        "T1c" = "T1",
+        "T1mi" = "T1",
+        "T2" = "T2",
+        "T2a" = "T2",
+        "T2a1" = "T2",
+        "T2a2" = "T2",
+        "T2b" = "T2",
+        "T2c" = "T2",
+        "T2d" = "T2",
+        "T3" = "T3+",
+        "T3a" = "T3+",
+        "T3b" = "T3+",
+        "T3c" = "T3+",
+        "T3d" = "T3+",
+        "T4" = "T3+",
+        "T4a" = "T3+",
+        "T4b" = "T3+",
+        "T4c" = "T3+",
+        "T4d" = "T3+",
+        "T4e" = "T3+",
+        "TX" = "TX",
+        "Ta" = "T1",
+        "Tis" = "T0",
+        "Tis (DCIS)" = "T0",
+        "Tis (LCIS)" = "T0",
+        "Tis (Paget's)" = "T0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "gender") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "female" = "female",
+        "male" = "male",
+        "unknown" = NA,
+        "unspecified" = NA,
+        "not reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "vital_status") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Alive" = "Alive",
+        "Dead" = "Dead",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "prior_malignancy") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "yes" = "yes",
+        "no" = "no",
+        "unknown" = NA,
+        "not reported" = NA,
+        "Not Allowed To Collect" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "alcohol_history") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Yes" = "Yes",
+        "No" = "No",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ann_arbor_b_symptoms") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "yes" = "yes",
+        "no" = "no",
+        "unknown" = NA,
+        "not reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "figo_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage IC1" = "Stage1",
+        "Stage IC2" = "Stage1",
+        "Stage IC3" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIA1" = "Stage3+",
+        "Stage IIIA2" = "Stage3+",
+        "Stage IIIAi" = "Stage3+",
+        "Stage IIIAii" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IV" = "Stage3+",
+        "Stage IVA" = "Stage3+",
+        "Stage IVB" = "Stage3+",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "masaoka_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(model.data[[name]]$clinical[[colname]], c(
+        "Stage I" = "Stage1",
+        "Stage IIa" = "Stage2",
+        "Stage IIb" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IVa" = "Stage3+",
+        "Stage IVb" = "Stage3+"),
+        warn_missing = FALSE
+      )
+    }
+    # primary and secondary gleason grade are weird
+  }
+}
+```
+
+# Models
+
+I'll first recalculate the availabilities again, now that the data is cropped and the levels have changed (I assume some NAs have been introduced):
+
+```{r}
+get_availability <- function(x, cutoff, varname="frac.availability", cut_0_mut = FALSE){
+  #' Produce a dataframe containing the relative percent availability of clinical
+  #' data (i.e. the % reported fields)
+  #'
+  #' @param x Data as created by project.py clinical frequency function
+  #' @param cutoff Remove all fields with % less than this value.
+  #' @param cut_0_mut If true, removes patients with 0 driver mutations.
+  #' @return Data availability frame
+  if(cut_0_mut){
+    x <- subset(x, x$frequency != 0)
+  }
+  # Numbers holds the amount of non-na values in the dataframe
+  numbers <- colSums(!is.na(x))
+  numbers <- numbers/length(x[,1])*100
+  numbers <- subset(numbers, numbers >= cutoff)
+  frame <- data.frame(numbers)
+  colnames(frame) <- varname
+  return(frame)
+}
+
+for (name in p.names) {
+  model.data[[name]]$availability <- get_availability(model.data[[name]]$clinical, cutoff=0, varname = name)
+}
+```
+
+These will be used later for variable selection.
+
+## General functions
+
+```{r}
+extract.avail <- function(project, percent) {
+  #' Extract the clinical variables that are at least PERCENT available from PROJECT
+  return(rownames(subset(project$availability, project$availability >= percent)))
+}
+
+ornone <- function(x) {
+  # Return x if it is not empty, else return "No Variables"
+  if (length(x) > 0) {
+    return(x)
+  } else {
+    return("No Variables")
+  }
+}
+
+select.vars <- function(project, percent = 90) {
+  # Select the variables to use in the models
+  #
+  # Retains only variables that have more than one level (the others would cause the models
+  # to crash) and those available.
+  # Returns the cleaned model data together with the selected variables.
+  # Also includes the data numerosity.
+
+  # 0 and 1 factor levels are useless. So I remove them here
+  to.remove <- c()
+  for (variable in names(project$clinical)) {
+    if (is.factor(project$clinical[[variable]]) | is.character(project$clinical[[variable]])) {
+      if (nlevels(as.factor(project$clinical[[variable]])) < 2) {
+        to.remove <- c(to.remove, variable)
+      }
+    }
+  }
+  # Selects the variables to use in the model
+  avail.vars <- extract.avail(project, percent)
+  out <- "Available variables:\n"
+  generic.vars.in <- avail.vars[avail.vars %in% selected.vars]
+  generic.vars.in <- generic.vars.in[!generic.vars.in %in% to.remove]
+  out <- paste(out, paste(generic.vars.in, collapse = " + "), "\n", sep="")
+  out <- paste(out, "Tumor-Specific Variables:\n", sep = "")
+  tspec.vars.in <- avail.vars[avail.vars %in% tumor.spec.vars]
+  tspec.vars.in <- tspec.vars.in[!tspec.vars.in %in% to.remove]
+  out <- paste(out, paste(ornone(tspec.vars.in), collapse = " + "), "\n", sep="")
+
+  cat(out)
+  completecases <- na.omit(project$clinical[, c(generic.vars.in, tspec.vars.in, "ID", "passenger.freq", "driver.freq")])
+  numerosity <- length(completecases$ID)
+  print(paste("Nr. vars:", length(c(generic.vars.in, tspec.vars.in)), "- Numerosity:", numerosity, "sqrt:", round(sqrt(numerosity), 2)))
+
+  # Generate the model data
+  return(list(
+    completecases,
+    c(generic.vars.in, tspec.vars.in),
+    floor(numerosity / 10),
+    floor(sqrt(numerosity))
+    )
+  )
+}
+
+diagnose.glmer <- function(model, leverage.threshold = 0.175, name = "") {
+  # Function made to supplant `autoplot` from ggfortify for glmer models
+  library(gridExtra)
+  library(ggplot2)
+  qqplot.data <- function (vec) {
+    y <- quantile(vec[!is.na(vec)], c(0.25, 0.75))
+    x <- qnorm(c(0.25, 0.75))
+    slope <- diff(y) / diff(x)
+    int <- y[1L] - slope * x[1L]
+
+    d <- data.frame(resids = vec)
+    plot <- ggplot(d, aes(sample = resids)) +
+      stat_qq(alpha = 0.8) +
+      geom_abline(
+        slope = slope,
+        intercept = int,
+        col = "blue",
+        alpha = 0.8
+      ) +
+      ggtitle("Normal Q-Q of Residuals") +
+      theme_minimal() +
+      xlab("Theoretical Quantiles") + ylab("Pearson Residuals")
+    return(plot)
+  }
+
+  p1 <- ggplot(data.frame(
+    eta = predict(model, type = "link"),
+    pearson = residuals(model, type = "pearson")
+  ),
+  aes(x = eta, y = pearson)) +
+    geom_point(alpha = 0.8) +
+    theme_minimal() +
+    ggtitle("Residuals vs Estimates") +
+    xlab("Estimates") + ylab("Pearson Residuals") +
+    geom_smooth(
+      col = "blue",
+      method = "loess",
+      formula = "y ~ x",
+      se = FALSE,
+      alpha = 0.8,
+      size = 0.7
+    )
+
+  p2 <- qqplot.data(residuals(model))
+
+  lever <- suppressWarnings(hatvalues(model))
+  toohigh <- which(lever >= leverage.threshold)
+  len <- length(residuals(model))
+
+  stuff <-
+    data.frame(
+      lev = lever,
+      pearson = residuals(model, type = "pearson"),
+      len = seq(from = 1, to = len, by = 1)
+    )
+
+  p3 <- ggplot(stuff, aes(x = lev, y = pearson, label = len)) +
+    geom_point(alpha = 0.8) +
+    theme_minimal() +
+    ggtitle("Residuals vs Leverage") +
+    xlab("Leverage") + ylab("Pearson Residuals") +
+    geom_point(
+      data = subset(stuff, stuff$lev >= leverage.threshold),
+      col = "red",
+      shape = 1,
+      size = 2.8
+    ) +
+    geom_smooth(
+      col = "blue",
+      method = "loess",
+      formula = "y ~ x",
+      se = FALSE,
+      alpha = 0.8,
+      size = 0.7
+    )
+
+  objclass <- suppressWarnings(class(model))[1]
+
+  #if (objclass == "glmerMod") {
+  if (TRUE) {
+    p4 <-
+      ggplot(model, aes(fitted(model), sqrt(abs(
+        residuals(model)
+      )))) + geom_point(na.rm = TRUE) +
+      stat_smooth(
+        method = "loess",
+        na.rm = TRUE,
+        col = "blue",
+        size = 0.7,
+        se = FALSE
+      ) + xlab("Fitted Value") +
+      ylab(expression(sqrt("|Standardized residuals|"))) +
+      ggtitle("Scale-Location") + theme_minimal()
+    if (name != "") {
+      grid.arrange(p1, p2, p4, p3, nrow = 2, top = name)
+    } else {
+      grid.arrange(p1, p2, p4, p3, nrow = 2)
+    }
+  } else{
+    if (name != "") {
+      grid.arrange(p1, p2, p3, nrow = 2, top = name)
+    } else {
+      grid.arrange(p1, p2, p3, nrow = 2)
+    }
+  }
+
+
+  if (length(toohigh) != 0) {
+    print(
+      paste(
+        "The point(s)",
+        paste(toohigh, collapse = ", "),
+        "have leverage which is higher than",
+        leverage.threshold,
+        sep = " "
+      )
+    )
+  }
+}
+
+best <- function(glmulti) {
+  return(glmulti@objects[[1]])
+}
+
+exclude <- function(dframe, rows) {
+  return(dframe[-rows, ])
+}
+
+```
+
+We prefer the ajcc codes from clinical evaluation. But if they are not available, we use the pathologic values.
+
+I think they are mutually excluse. Let's check that:
+
+```{r}
+mutual.exclusive.ajcc <- function(project, name) {
+  # This is terrible, but I just don't want to do it manually
+  data.vars <- extract.avail(project, 90)
+  collided <- FALSE
+  if ("ajcc_clinical_m" %in% data.vars & "ajcc_pathologic_m" %in% data.vars) {
+    print(paste("In project", name, "ajcc m collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_n" %in% data.vars & "ajcc_pathologic_n" %in% data.vars) {
+    print(paste("In project", name, "ajcc n collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_t" %in% data.vars & "ajcc_pathologic_t" %in% data.vars) {
+    print(paste("In project", name, "ajcc t collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_stage" %in% data.vars & "ajcc_pathologic_stage" %in% data.vars) {
+    print(paste("In project", name, "ajcc stage collides."))
+    collided <- TRUE
+  }
+  if (!collided) {
+    print(paste("No collisions detected for", name))
+  }
+}
+
+for (name in p.names) {
+  mutual.exclusive.ajcc(model.data[[name]], name)
+}
+```
+
+Some tumors collide in some variables, but not many. I'll prefer the clinical variables.
+
+I'll do some cursory exploration with some basic models, evaluate their performance, and automate the process, so we see an overview of all tumor types. Eventually we will decide which is best to use, I guess.
+
+The data is assumed to have already been cropped at some point.
+
+```{r}
+make.formula <- function(response, predictors) {
+  return(paste(response, paste(predictors, collapse = "+"), sep = " ~ "))
+}
+
+make.models <- function(project, exclude.pts = NULL, level = 1, leverage.treshold = 0.175, avail.percent = 90, ignore.vars = NULL) {
+  x <- select.vars(project, percent = avail.percent)
+
+  if (!is.null(exclude.pts)) {
+    model.data <- exclude(x[[1]], exclude.pts)
+  } else {
+    model.data <- x[[1]]
+  }
+
+  vars <- x[[2]]
+  max.vars <- min(x[[3]], x[[4]])
+
+  if (!is.null(ignore.vars)) {
+    if (any(vars %in% ignore.vars)) {
+      print("Ignoring variables")
+      vars <- vars[!vars %in% ignore.vars]
+    } else {
+      print("There are variables to ignore, but none of them are considered")
+    }
+  }
+
+  models <- list()
+
+  # Passenger models
+  print("Generating Passenger Model - Gauss")
+  models$all.pass.gauss <- glmulti(y = "passenger.freq", xr = vars, level = level, report = FALSE, plotty = FALSE, data=model.data, method = "h", family = gaussian, marginality = TRUE, maxsize = x[[3]])
+  cat("Best passenger model - Gauss")
+  best(models$all.pass.gauss) %>% summary() %>% print()
+  best(models$all.pass.gauss) %>% autoplot() %>% print()
+  best(models$all.pass.gauss) %>% diagnose.glmer(leverage.treshold, name = "Pass Gauss") %>% print()
+
+  print("Generating Passenger Model - Poisson")
+  models$all.pass.poiss <- glmulti(y = "passenger.freq", xr = vars, level = level, report = FALSE, plotty = FALSE, data=model.data, method = "h", family = poisson, marginality = TRUE, maxsize = x[[3]])
+  print("Best passenger model - Poisson")
+  best(models$all.pass.poiss) %>% summary() %>% print()
+  best(models$all.pass.poiss) %>% autoplot() %>% print()
+  best(models$all.pass.poiss) %>% diagnose.glmer(leverage.treshold, name = "Pass Poiss") %>% print()
+
+  # I tried a quasipoisson model but it gives a weird `cricri` error, and I think it's inside
+  # the implementation for glmulti, from the source code. I don't know how to fix it, really.
+  # So I'll just make a single model with all variables from the poisson model.
+
+  models$simple.pass.qpoiss <- glm(formula(best(models$all.pass.poiss)), data = model.data, family = quasipoisson)
+    print("Best passenger model - Quasi Poisson")
+  models$simple.pass.qpoiss %>% summary() %>% print()
+  models$simple.pass.qpoiss %>% autoplot() %>% print()
+  models$simple.pass.qpoiss %>% diagnose.glmer(leverage.treshold, name = "Pass Qpoiss") %>% print()
+
+  print("Generating passenger model - Negative Binomial")
+  models$all.pass.nb <- glmulti(y = "passenger.freq", xr = vars, level = level, report = FALSE, plotty = FALSE, data=model.data, method = "h", fitfunction = glm.nb, marginality = TRUE, maxsize = x[[3]])
+  print("Best passenger model - Negative Binomial")
+  best(models$all.pass.nb) %>% summary() %>% print()
+  best(models$all.pass.nb) %>% diagnose.glmer(leverage.treshold, name = "Pass NegBi") %>% print()
+
+  # Driver models
+  print("generating Driver Model - Gauss")
+  models$all.driver.gauss <- glmulti(y = "driver.freq", xr = vars, level = level, report = FALSE, plotty = FALSE, data=model.data, method = "h", family = gaussian, marginality = TRUE, maxsize = x[[3]])
+  print("Best Driver model - Gauss")
+  best(models$all.driver.gauss) %>% summary() %>% print()
+  best(models$all.driver.gauss) %>% autoplot() %>% print()
+  best(models$all.driver.gauss) %>% diagnose.glmer(leverage.treshold, name = "Driver Gauss") %>% print()
+
+  # cannot do a driver model for Poisson or QuasiPoisson as there are zeroes.
+
+  print("generating Driver Model - Negative Binomial")
+  models$all.driver.gauss <- glmulti(y = "driver.freq", xr = vars, level = level, report = FALSE, plotty = FALSE, data=model.data, method = "h", fitfunction = glm.nb, marginality = TRUE, maxsize = x[[3]])
+  print("Best Driver model - Negative Binomial")
+  best(models$all.driver.gauss) %>% summary() %>% print()
+  best(models$all.driver.gauss) %>% autoplot() %>% print()
+  best(models$all.driver.gauss) %>% diagnose.glmer(leverage.treshold, name = "Driver NegBi") %>% print()
+
+  return(models)
+}
+```
+
+
+## TCGA-ACC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-ACC` <- make.models(model.data$`TCGA-ACC`, leverage.treshold = 0.5)
+```
+
+## TCGA-BLCA
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-BLCA` <- make.models(model.data$`TCGA-BLCA`, leverage.treshold = 0.5)
+```
+## TCGA-BRCA
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-BRCA` <- make.models(model.data$`TCGA-BRCA`, leverage.treshold = 0.5)
+```
+
+## TCGA-CESC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-CESC` <- make.models(model.data$`TCGA-CESC`, leverage.treshold = 0.5)
+```
+
+## TCGA-CHOL
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-CHOL` <- make.models(model.data$`TCGA-CHOL`, leverage.treshold = 0.5)
+```
+
+## TCGA-COAD
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-COAD` <- make.models(model.data$`TCGA-COAD`, leverage.treshold = 0.5)
+```
+
+## TCGA-DLBC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-DLBC` <- make.models(model.data$`TCGA-DLBC`, leverage.treshold = 0.5)
+```
+
+## TCGA-ESCA
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-ESCA` <- make.models(model.data$`TCGA-ESCA`, leverage.treshold = 0.5)
+```
+
+## TCGA-GBM
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-GBM` <- make.models(model.data$`TCGA-GBM`, leverage.treshold = 0.5)
+```
+
+## TCGA-HNSC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-HNSC` <- make.models(model.data$`TCGA-HNSC`, leverage.treshold = 0.5, ignore.vars = c("ajcc_pathologic_n", "ajcc_pathologic_t"))
+```
+
+## TCGA-KICH
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-KICH` <- make.models(model.data$`TCGA-KICH`, leverage.treshold = 0.5)
+```
+
+## TCGA-KIRC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-KIRC` <- make.models(model.data$`TCGA-KIRC`, leverage.treshold = 0.5)
+```
+
+## TCGA-KIRP
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-KIRP` <- make.models(model.data$`TCGA-KIRP`, leverage.treshold = 0.5, ignore.vars = c("ajcc_pathologic_m"))
+```
+
+## TCGA-LAML
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-LAML` <- make.models(model.data$`TCGA-LAML`, leverage.treshold = 0.5)
+```
+
+## TCGA-LGG
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-LGG` <- make.models(model.data$`TCGA-LGG`, leverage.treshold = 0.5)
+```
+
+## TCGA-LIHC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-LIHC` <- make.models(model.data$`TCGA-LIHC`, leverage.treshold = 0.5)
+```
+
+## TCGA-LUAD
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-LUAD` <- make.models(model.data$`TCGA-LUAD`, leverage.treshold = 0.5)
+```
+
+## TCGA-LUSC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-LUSC` <- make.models(model.data$`TCGA-LUSC`, leverage.treshold = 0.5)
+```
+
+## TCGA-MESO
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-MESO` <- make.models(model.data$`TCGA-MESO`, leverage.treshold = 0.5)
+```
+
+## TCGA-OV
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-OV` <- make.models(model.data$`TCGA-OV`, leverage.treshold = 0.5)
+```
+
+## TCGA-PAAD
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-PAAD` <- make.models(model.data$`TCGA-PAAD`, leverage.treshold = 0.5)
+```
+
+## TCGA-PCPG
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-PCPG` <- make.models(model.data$`TCGA-PCPG`, leverage.treshold = 0.5)
+```
+
+## TCGA-PRAD
+
+This tumor has something weird. The NAs overlap so well that the dataframe ends up empty if I don't set the filtering to at least 99 percent.
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-PRAD` <- make.models(model.data$`TCGA-PRAD`, leverage.treshold = 0.5, avail.percent = 100)
+```
+
+## TCGA-READ
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-READ` <- make.models(model.data$`TCGA-READ`, leverage.treshold = 0.5)
+```
+
+## TCGA-SARC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-SARC` <- make.models(model.data$`TCGA-SARC`, leverage.treshold = 0.5)
+```
+
+## TCGA-SKCM
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-SKCM` <- make.models(model.data$`TCGA-SKCM`, leverage.treshold = 0.5)
+```
+
+## TCGA-STAD
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-STAD` <- make.models(model.data$`TCGA-STAD`, leverage.treshold = 0.5)
+```
+
+## TCGA-TGCT
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-TGCT` <- make.models(model.data$`TCGA-TGCT`, leverage.treshold = 0.5, avail.percent = 85)
+```
+
+## TCGA-THCA
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-THCA` <- make.models(model.data$`TCGA-THCA`, leverage.treshold = 0.5)
+```
+
+## TCGA-THYM
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-THYM` <- make.models(model.data$`TCGA-THYM`, leverage.treshold = 0.5)
+```
+
+## TCGA-UCEC
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-UCEC` <- make.models(model.data$`TCGA-UCEC`, leverage.treshold = 0.5)
+```
+
+## TCGA-UCS
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-UCS` <- make.models(model.data$`TCGA-UCS`, leverage.treshold = 0.5)
+```
+
+## TCGA-UVM
+
+```{r, fig.width=6, fig.height=4}
+models$`TCGA-UVM` <- make.models(model.data$`TCGA-UVM`, leverage.treshold = 0.5, ignore.vars = c("ajcc_pathologic_m", "ajcc_pathologic_t", "ajcc_pathologic_n", "ajcc_pathologic_stage"))
+```

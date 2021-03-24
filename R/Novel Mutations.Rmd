@@ -1,0 +1,48 @@
+---
+title: "Novel mutations"
+output: html_notebook
+---
+
+```{r}
+library(tidyverse)
+```
+
+```{r}
+load(file = "F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data.RData")
+p.names <- names(projects)
+models <- list()
+model.data <- list()
+
+for (name in p.names) {
+  models[[name]] <- list()
+}
+```
+
+Are there any novel mutations detected by CHASMPlus? Are they anything of interest?
+
+I'll use the Cancer Gene Census list of genes as the list of known genes.
+
+```{r}
+cgc.all <- read.table(file = "F:/Data/University/Thesis/Data/CosmicMutantExportCensus.tsv", sep = "\t", header = TRUE)
+known.gene.list <- unique(cgc.all$Gene.name)
+```
+
+The HUGO renames are not here, at least in the same format I have...TODO: convert between the two.
+
+```{r}
+rm(cgc.all)
+```
+
+```{r}
+novel.genes <- list()
+for (name in p.names) {
+  projects[[name]]$crystal$Hugo %>% subset(!projects[[name]]$crystal$Hugo %in% known.gene.list) %>% unique() -> novel.genes[[name]]
+}
+```
+
+Fuse all of them into a single, "new genes" list.
+
+```{r}
+novel.genes %>% reduce(c) %>% unique() -> all.novel.genes
+all.novel.genes %>% cat(sep = "\n")
+```

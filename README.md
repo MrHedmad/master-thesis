@@ -27,6 +27,6 @@ The manuals are bundled in the tools themselves. All tools support a `--help` op
 ### Testing
 Some unit tests are available for some functions in the scripts. To run all of them, just run `./runtests` from inside the virtual environment. They are stored inside of `./tests`.
 ## R scripts
-[![R version](https://img.shields.io/badge/R%20version-4.0.2-blue)](https://www.r-project.org/)
+[![R version](https://img.shields.io/badge/R%20version-4.0.4-blue)](https://www.r-project.org/)
 
 The R scripts are written and should probably be run in RStudio. The R environment is currently not version controlled. Install every package that is loaded with `library` and it should be fine.

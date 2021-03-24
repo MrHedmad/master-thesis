@@ -53,6 +53,12 @@ preprocess_clinical <- function(data){
   # I'm guessing these fields where empty in the pandas dataframe and thus result empty here, so I'm setting them to NA.
   # Back to factors
   data %>% mutate_if(is.character, as.factor) -> data
+
+  # Just renaming the frequency columns to more meaningful names
+  data$driver.freq <- data$frequency
+  data$frequency <- NULL
+  data$passenger.freq <- data$passenger_freq
+  data$passenger_freq <- NULL
   return(data)
 }
 

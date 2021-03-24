@@ -2,12 +2,14 @@ library(dplyr)
 library(ggplot2)
 library(ComplexHeatmap)
 library(circlize)
+library(ggExtra)
+library(cowplot)
 
 # Barplots
 # Histograms showing the number of passenger and driver mutations
 MutationHist <- function(data, title="Number of mutations per patient"){
   library(ggplot2)
-  tabulated_freqs <- table(data$frequency)
+  tabulated_freqs <- table(data$driver.freq)
   set_vjust_col <- function(count){
     if(count > 15){
       return("white")
@@ -15,10 +17,10 @@ MutationHist <- function(data, title="Number of mutations per patient"){
       return("blue")
     }
   }
-  plot <- ggplot(data, aes(x=frequency)) +
+  plot <- ggplot(data, aes(x=driver.freq)) +
     theme_minimal() +
     geom_bar(stat="count", show.legend=FALSE, fill="darkblue", width=1) +
-    scale_x_continuous(breaks=seq(from=0, to=max(data$frequency), by=1), minor_breaks = NULL) +
+    scale_x_continuous(breaks=seq(from=0, to=max(data$driver.freq), by=1), minor_breaks = NULL) +
     xlab("Number of Driver Mutations") + ylab("Number of Patients") +
     ggtitle(title)
 
@@ -157,7 +159,7 @@ plotjitter <- function(
   if(na.rm){
     data <- subset(data, !is.na(data[[response]]))
   }
-  p <- ggplot(data, aes(y=frequency, x=.data[[response]])) +
+  p <- ggplot(data, aes(y=driver.nr, x=.data[[response]])) +
     geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
     xlab(response_label) +
     ylab("Number of Driver Mutations") +
@@ -173,5 +175,43 @@ plotjitter <- function(
   print(p)
 }
 
+driverboxplots <- function(clinical.data, project.id, colour = "lightblue"){
+  clinical.data$driver.freq <- as.factor(clinical.data$driver.freq)
+  plot <- ggplot(clinical.data, aes(group = driver.freq, x = driver.freq, y = passenger.freq)) +
+    stat_boxplot(geom ='errorbar', width = 0.4) +
+    geom_point(alpha=0) +
+    geom_boxplot(fill = colour) +
+    scale_y_log10() +
+    ylab("Passenger frequency") + xlab("Driver Frequency") +
+    ggtitle(paste("Pass/Driver distributions -", project.id)) +
+    theme_bw() + theme(panel.grid.minor = element_blank()) +
+    annotation_logticks(sides = "l")
+
+  clinical.data$driver.freq <- as.numeric(clinical.data$driver.freq)
+  x.box <- axis_canvas(plot, axis = "x", coord_flip = TRUE) +
+    stat_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), geom ='errorbar') +
+    geom_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), fill = colour) +
+    coord_flip()
+  suppressMessages(
+    y.box <- axis_canvas(plot, axis = "y") +
+      # Re-adding the log10 scale generates a warning, so I'm suppressing it
+      scale_y_log10() +
+      stat_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), geom ='errorbar') +
+      geom_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), fill = colour)
+  )
+
+  empty <- ggdraw()
+
+  final.plot <- insert_xaxis_grob(plot, x.box, grid::unit(7, "mm"), position = "top")
+  final.plot <- insert_xaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "top")
+
+  final.plot <- insert_yaxis_grob(final.plot, y.box, grid::unit(7, "mm"), position = "right")
+  final.plot <- insert_yaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "right")
+
+  return(ggdraw(final.plot))
+}
+
 # BRCA preview
 #plotjitter(projects$`TCGA-BRCA`$clinical, "passenger_freq", "Number of Passenger mutations", title = "Driver vs Passenger - TCGA-BRCA")
+#driverboxplots(projects$`TCGA-BRCA`$clinical, "TCGA-BRCA")
+#driverboxplots(projects$`TCGA-GBM`$clinical, "TCGA-GBM")
