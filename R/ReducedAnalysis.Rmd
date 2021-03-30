@@ -1,0 +1,1824 @@
+---
+title: "Reduced Tumor Analysis"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r global options, include = FALSE}
+# Do not include warnings in the output PDF
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+We will run again the analysis but only on those 5 tumors of interest. These are Colon cancer (`TCGA-COAD`, 	Colon adenocarcinoma), Breast cancer (`TCGA-BRCA`, Breast invasive carcinoma), Lung cancer (`TCGA-LUAD`, Lung adenocarcinoma), melanoma (`TCGA-SKCM`, Skin Cutaneous Melanoma) and of course Brain cancer (`TCGA-GBM`, Glioblastoma multiforme).
+
+```{r}
+p.interest <- c("TCGA-COAD", "TCGA-BRCA", "TCGA-LUAD", "TCGA-SKCM", "TCGA-GBM")
+```
+
+# Preamble
+
+```{r}
+library(plyr) # Data shape casting (needs to be loaded before dplyr)
+library(tidyverse)
+# Tidyverse loads ggplot2, purrr, tibble, dplyr, tidyr, stringr, readr and forcats
+# This suppresses the warning that summarise makes about grouping.
+options(dplyr.summarise.inform = FALSE)
+library(reshape2) # Data melt and cast
+library(glmulti) # Multimodel inference
+library(cowplot) # Margin plots made (a bit) easier
+library(ggfortify) # `autoplot` for glms
+library(MASS) # glm.nb implementation
+library(clusterSim) # Index.DB and other measures
+library(gridExtra) # Stuff like grid.arrange
+
+# The docstring package is entirely optional but it allows me to print out help messages
+# as I write more code, so it's nice as I often forget what my own functions do...
+library(docstring)
+```
+
+Other packages that need to be installed (I call them sporadically without bringing them into scope):
+```{r, eval=FALSE}
+library(ggrepel) # Add labels over scatterplots
+library(jtools) # Provides easy effect plots
+```
+
+Load the preprocessed data. The data is the one that comes from the `data_preprocessing.R` script. It's
+
+```{r}
+load(file = "F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data.RData")
+# I just take out the tumor names for easy iteration later
+p.names <- names(projects)
+
+get.name <- function(clinical) {
+  #' Helper function to get the name of a clinical dataframe
+  return(attr(clinical, "project.id"))
+}
+
+# I save the tumor type in the clinical data as an attribute, as basically every function
+# that takes the clinical data also needs it (like, for plotting)
+# This way, I don't need to pass it manually every time, but just extract it from the data
+# itself.
+for (name in p.names) {
+  attr(projects[[name]]$clinical, "project.id") <- name
+}
+```
+
+# Descriptive Analysis
+
+> What is the shape of the data?
+
+## Basic Summary Statistics
+
+Basic statistics (`summary` is a bit messy as it considers all variables):
+
+```{r}
+# Sometimes, there are no males, so the function would error, so we need a
+# "safe" extract
+extract_safe <- function(t, what, default = 0) {
+  #' Safely extract variables
+  #'
+  #' Extract from a dataframe T a variable WHAT. If it's missing, return
+  #' DEFAULT instead
+  tryCatch(t[[what]], error = function(e) default)
+}
+
+sum_clin <- function(clinical.data){
+  # Get a custom summary for the clinical data
+  #
+  # Get some statistics about clinical data. Includes overall numerosity,
+  # driver numerosity, means and standard deviations for passenger/driver
+  # distributions, and more.
+  name <- get.name(clinical.data)
+  data <- clinical.data
+  totn <- length(data$ID)
+  n0mut <- length(data$ID[data$driver.freq == 0])
+  perc0mut <- n0mut/totn*100
+  sex <- table(data$gender)/totn*100
+
+  obj <- data.frame(
+    # tumor metadata
+    ID = name,
+    # Numerosities
+    numerosity = totn,
+    numerosity.0.drivers = n0mut,
+    percent.0.drivers = n0mut/totn*100,
+    # Driver distributions
+    mean.driver.nr = mean(data$driver.freq),
+    median.driver.nr = median(data$driver.freq),
+    sd.driver.nr = sd(data$driver.freq),
+    driver.var.coff = sd(data$driver.freq) / mean(data$driver.freq),
+    # Passenger distributions
+    mean.passenger.nr = mean(data$passenger.freq),
+    median.passenger.nr = median(data$passenger.freq),
+    sd.passenger.nr = sd(data$passenger.freq),
+    passenger.var.coff = sd(data$passenger.freq) / mean(data$passenger.freq),
+    # Sex
+    percent.reported.male = signif(extract_safe(sex, "male"), digits=4),
+    # Age
+    mean.age.years = mean((-data$days_to_birth)/365.25, na.rm = TRUE),
+    sd.age.years = sd((-data$days_to_birth)/365.25, na.rm = TRUE)
+  )
+
+  class(obj) <- "clinical_summary"
+
+  return(obj)
+}
+
+print.clinical_summary <- function(clin.stats){
+  # Pretty print the clinical data summary
+  #
+  # Takes the clinical data, and well, prints it but better.
+  l <- function(x){return(signif(x, digits = 4))}
+  cat(paste(
+    "Statistics for clinical data - ", clin.stats$ID, "\n", "\n",
+    "Numerosities:\n",
+    "\tNumber of patients :          ", clin.stats$numerosity, "\n",
+    "\tNr. of pat. with no drivers : ", clin.stats$numerosity.0.drivers, "\n",
+    "\t% of pat. with no drivers :   ", l(clin.stats$percent.0.drivers), " %\n",
+    "Driver Distribution:\n",
+    "\tMean Driver frequency :       ", l(clin.stats$mean.driver.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.driver.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$driver.var.coff), "\n",
+    "Passenger Distribution:\n",
+    "\tMean passenger frequency :    ", l(clin.stats$mean.passenger.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.passenger.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$passenger.var.coff), "\n",
+    "\tMedian passenger frequency:   ", l(clin.stats$median.passenger.nr), "\n",
+    "\n",
+    "% reported male:  ", clin.stats$percent.reported.male, " %\n",
+    "Mean Age (years): ", l(clin.stats$mean.age.years), "\n",
+    "SD age (years):   ", l(clin.stats$sd.age.years),
+    sep=""
+  ))
+}
+
+descriptive.stats <- list()
+
+for (name in p.names) {
+  descriptive.stats[[name]] <- sum_clin(projects[[name]]$clinical)
+}
+
+for (name in p.interest) {
+  descriptive.stats[[name]] %>% print()
+  # Just some visual separator
+  cat("\n\n--------------------------------\n\n")
+}
+```
+
+The data is slightly more skewed for the male cohort, except for BRCA (obviously) and COAD. Numerosity is high in all of the tumors.
+
+We can now see some distributions.
+
+## Frequency Histograms
+
+```{r, fig.width=6, fig.height=4}
+freq.histogram <- function(
+    clinical.data, variable,
+    colour = "darkblue", label.colour = colour
+  ){
+  #' Mutation histograms from clinical frames
+  #'
+  #' Produce a histogram with the distribution of the mutational frequencies.
+  #' @param clinical.data Clinical data from a project
+  #' @param variable The variable to plot. Either `"driver.freq"` or `"passenger.freq"`
+  #' @param project.name The name of the project
+  #'
+  #' Made to work with project-like clinical data with a `project.id` attribute.
+  library(ggplot2)
+
+  stopifnot(variable %in% c("driver.freq", "passenger.freq"))
+
+  data <- clinical.data
+  title <- paste("Number of driver mutations per patient -", get.name(data))
+
+  tabulated_freqs <- table(data[[variable]])
+
+  p <- ggplot(data, aes(x=.data[[variable]])) +
+    theme_minimal() +
+    geom_bar(stat="count", show.legend=FALSE, fill=colour, width=1) +
+    scale_x_continuous(
+      breaks=seq(from=0, to=max(data[[variable]]), by=1), minor_breaks = NULL
+      ) +
+    xlab("Number of Driver Mutations") + ylab("Number of Patients") +
+    ggtitle(title)
+
+  # I need to change dynamically the colours of the labels.
+  pdata <- ggplot_build(p)
+  set_vjust_val <- function(x, t=10){if(x > t){return(2)} else {return(-2)}}
+  set_vjust_col <- function(x, t=10){if(x > t){return("white")} else {return(label.colour)}}
+  unnested <- pdata[[1]][[1]]
+  vjust_values <- unlist(lapply(unnested$count, set_vjust_val, t=max(unnested$count)/10))
+  vjust_colours <- unlist(lapply(unnested$count, set_vjust_col, t=max(unnested$count)/10))
+
+  p <- p + geom_text(stat='count', aes(label=..count..), vjust=vjust_values, col=vjust_colours)
+  print(p)
+}
+
+for (name in p.interest) {
+  freq.histogram(projects[[name]]$clinical, variable = "driver.freq")
+}
+```
+
+I don't even bother printing out the passenger distributions, as they are barely legible without cropping the data.
+
+## Passenger - Driver distributions
+
+Now, boxplots of the distributions of passengers by the amount of drivers.
+
+```{r, fig.width=6, fig.height=4}
+driver.boxplot <- function(clinical.data, colour = "lightblue"){
+  #' Create a driver boxplot graph from project clinical data
+  #'
+  #' The scales of the passenger frequency is logarithmic (base 10), because
+  #' the data has a very long tail towards large numbers.
+  #' @param clinical.data Clinical data from a project
+  #' @param colour The colour that fills the boxplots
+  #'
+  #' Made to work with project-like clinical data with a `project.id` attribute.
+  clinical.data$driver.freq <- as.factor(clinical.data$driver.freq)
+  project.id <- get.name(clinical.data)
+
+  base.plot <- ggplot(
+      clinical.data, aes(group = driver.freq, x = driver.freq, y = passenger.freq)
+    ) +
+    stat_boxplot(geom ='errorbar', width = 0.4) +
+    geom_point(alpha=0) +
+    geom_boxplot(fill = colour) +
+    scale_y_log10() +
+    ylab("Passenger frequency") + xlab("Driver Frequency") +
+    ggtitle(paste("Pass/Driver distributions -", project.id)) +
+    theme_bw() + theme(panel.grid.minor = element_blank()) +
+    annotation_logticks(sides = "l")
+
+  clinical.data$driver.freq <- as.numeric(clinical.data$driver.freq)
+  x.box <- axis_canvas(base.plot, axis = "x", coord_flip = TRUE) +
+    stat_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), geom ='errorbar') +
+    geom_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), fill = colour) +
+    coord_flip()
+  # Re-adding the log10 scale generates a warning, but it's useless. So I suppress it.
+  suppressMessages(
+    y.box <- axis_canvas(base.plot, axis = "y") +
+      scale_y_log10() +
+      stat_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), geom ='errorbar') +
+      geom_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), fill = colour)
+  )
+
+  empty <- ggdraw()
+
+  final.plot <- insert_xaxis_grob(base.plot, x.box, grid::unit(7, "mm"), position = "top")
+  final.plot <- insert_xaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "top")
+
+  final.plot <- insert_yaxis_grob(final.plot, y.box, grid::unit(7, "mm"), position = "right")
+  final.plot <- insert_yaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "right")
+
+  return(ggdraw(final.plot))
+}
+
+for (name in p.interest) {
+  print(driver.boxplot(projects[[name]]$clinical, colour = "lightgreen"))
+}
+```
+
+Some tumors have only patients with low mutational burden, while others have high mutational burden. I plot the average amount of drivers vs the average amount of passenger for each tumor type.
+
+```{r, fig.width=10}
+crop.at <- function(clinical.data, percentile) {
+  # Crops clinical data of a project at some percentile for passenger mutations
+  return(
+    subset(
+      clinical.data,
+      clinical.data$passenger.freq < quantile(
+        clinical.data$passenger.freq, percentile / 100)
+      )
+    )
+}
+
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+reshapedata <- lapply(projects, function(x) {
+  name <- get.name(x$clinical)
+  x$clinical %>% crop.at(90) -> x$clinical
+  return(
+    data.frame(
+      ID = name,
+      avg.drivers = mean(x$clinical$driver.freq),
+      avg.passengers = mean(x$clinical$passenger.freq),
+      med.drivers = median(x$clinical$driver.freq),
+      med.passengers = median(x$clinical$passenger.freq),
+      mod.drivers = getmode(x$clinical$driver.freq),
+      mod.passengers = getmode(x$clinical$passenger.freq)
+    )
+  )
+})
+reshapedata %>% reduce(rbind) -> reshapedata
+
+ggplot(reshapedata, aes(x = avg.drivers, y = avg.passengers)) +
+  geom_smooth(method = "lm", formula = "y ~ x", se=FALSE, alpha = 0.5, colour = "lightblue") +
+  geom_point(color = "red", size = 2) +
+  ggrepel::geom_text_repel(aes(label = ID), size = 3, max.overlaps = 15, min.segment.length = 0) +
+  #scale_x_continuous(trans=scales::pseudo_log_trans(base = 10, sigma = 0.1)) +
+  #scale_y_continuous(trans=scales::pseudo_log_trans(base = 10)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  annotation_logticks() +
+  ggtitle("Average Passengers vs Average Drivers (Cropped Data)") +
+  xlab("Average Drivers") + ylab("Average Passengers") +
+  theme_bw()
+
+ggplot(reshapedata, aes(x = med.drivers, y = med.passengers)) +
+  geom_smooth(method = "lm", formula = "y ~ x", se=FALSE, alpha = 0.5, colour = "lightblue") +
+  geom_point(color = "red", size = 2) +
+  ggrepel::geom_text_repel(aes(label = ID), size = 3, max.overlaps = 15, min.segment.length = 0) +
+  scale_x_continuous(trans=scales::pseudo_log_trans(base = 10, sigma = 0.1)) +
+  #scale_y_continuous(trans=scales::pseudo_log_trans(base = 10)) +
+  #scale_x_log10() +
+  scale_y_log10() +
+  annotation_logticks() +
+  ggtitle("Median Passengers vs Median Drivers (Cropped Data)") +
+  xlab("Median Drivers") + ylab("Median Passengers") +
+  theme_bw()
+
+ggplot(reshapedata, aes(x = mod.drivers, y = mod.passengers)) +
+  geom_smooth(method = "lm", formula = "y ~ x", se=FALSE, alpha = 0.5, colour = "lightblue") +
+  geom_point(color = "red", size = 2) +
+  ggrepel::geom_text_repel(aes(label = ID), size = 3, max.overlaps = 15, min.segment.length = 0) +
+  scale_x_continuous(trans=scales::pseudo_log_trans(base = 10, sigma = 0.1)) +
+  #scale_y_continuous(trans=scales::pseudo_log_trans(base = 10)) +
+  #scale_x_log10() +
+  scale_y_log10() +
+  annotation_logticks() +
+  ggtitle("Mode of Passengers vs Mode of Drivers (Cropped Data)") +
+  xlab("Mode of Drivers") + ylab("Mode of Passengers") +
+  theme_bw()
+
+```
+
+The above log/log plot shows that there is some link between the average amount of drivers and the average amount of passengers in a tumor type. It could be worth modelling. Interestingly, Glioblastoma Multiforme seems to be in the middle of the distribution. The faint blue line represents a linear model with formula `y ~ x`.
+
+For mean and mode, the plot is distorted as to accommodate the presence of zeroes.
+
+# Novel mutations
+
+> Are there any novel mutations detected by the CHASMplus?
+
+I'll use the Cancer Gene Census list of genes as the list of known genes. I downloaded it on the 15th of March, 2021. I pre-filtered it manually to only contain the unique genes, and saved it as such.
+
+I include the code that generated the loaded file for posterity:
+
+```{r, eval=FALSE}
+cgc.all <- read.table(
+  file = "F:/Data/University/Thesis/Data/CosmicMutantExportCensus.tsv",
+  sep = "\t", header = TRUE
+  )
+known.gene.list <- unique(cgc.all$Gene.name)
+write(known.gene.list, "F:/Data/University/Thesis/Data/UniqueCosmicMutations.txt")
+rm(cgc.all)
+```
+
+```{r}
+known.gene.list <- readLines("F:/Data/University/Thesis/Data/UniqueCosmicMutations.txt")
+```
+
+The HUGO renames (GENE_MUTATION) are not here, at least in the same format I have...
+TODO: convert between the two.
+
+```{r}
+novel.genes <- list()
+for (name in p.names) {
+  projects[[name]]$crystal$Hugo %>%
+    subset(!projects[[name]]$crystal$Hugo %in% known.gene.list) %>%
+    unique() -> novel.genes[[name]]
+}
+```
+
+Fuse all of them into a single, "new genes" list.
+
+```{r}
+novel.genes %>% reduce(c) %>% unique() -> all.novel.genes
+all.novel.genes %>% write("F:/Data/University/Thesis/Data/NovelMutations.txt")
+print(all.novel.genes)
+```
+
+There are 435 novel genes across all tumor types. I'll run them through `EnricR` to see if there are some enrichments.
+
+# Models
+
+## Model Data preprocessing
+
+The data is still a bit raw to be fed directly into models. There are a lot of passenger outliers, so I crop the distributions at the 90th percentile. This is arbitrary, but get rid of a lot of outlier patients.
+
+### High Passenger Frequency distortion
+
+I need to crop the data at the 90th percentile. I do this in the next step as I also want to keep an uncropped data model.
+
+### Variable level simplification
+
+Now I need to remove some types of levels from the data, otherwise there are too many of them. I also declare which variables are of interest. As far as I can tell, the clinical scores "overwrite" the pathologic ones if they are present.
+
+```{r}
+# I make a second pointer here to keep the projects untouched by the
+# model preprocessing.
+model.data <- projects
+
+# Vector of variables that we think are of interest
+# This were hand picked by the professor.
+selected.vars <- c(
+  "gender", "vital_status", "age_at_diagnosis", "icd_10_code",
+  "prior_malignancy", "alcohol_history", "bmi", "ajcc_clinical_m",
+  "ajcc_clinical_n", "ajcc_clinical_t", "ajcc_clinical_stage",
+  "ajcc_pathologic_m", "ajcc_pathologic_n", "ajcc_pathologic_t",
+  "ajcc_pathologic_stage"
+)
+tumor.spec.vars <- c(
+  "ann_arbor_b_symptoms", "figo_stage", "masaoka_stage",
+  "primary_gleason_grade", "secondary_gleason_grade"
+)
+
+all.vars <- c(selected.vars, tumor.spec.vars)
+
+all.factors <- all.vars[!all.vars %in% c("age_at_diagnosis", "bmi")]
+
+for (name in p.names) {
+  collnamess <- names(model.data[[name]]$clinical)
+  for (colname in collnamess) {
+    if (colname %in% all.factors) {
+      # Convert the factorial or factorial-like data to factors for reshaping
+      model.data[[name]]$clinical[[colname]] <- as.factor(model.data[[name]]$clinical[[colname]])
+    }
+    # Clinical ajcc scores considerations:
+    # The scores are too precise to work well as model factors, so I simplify them here
+    # into low-grade tumors and high grade tumors.
+    if (colname == "ajcc_clinical_m") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "M0" = "M0",
+        "M1" = "M1",
+        "M1a" = "M1",
+        "M1b" = "M1",
+        "M1c" = "M1",
+        "MX" = "MX", # TODO: Is this an NA?
+        "cM0 (i+)" = "M0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_n") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "N0" = "N0",
+        "N0 (i+)" = "N0",
+        "N0 (i-)" = "N0",
+        "N0 (mol+)" = "N0",
+        "N0 (mol-)" = "N0",
+        "N1" = "N1",
+        "N1a" = "N1",
+        "N1b" = "N1",
+        "N1bI" = "N1",
+        "N1bII" = "N1",
+        "N1bIII" = "N1",
+        "N1bIV" = "N1",
+        "N1c" = "N1",
+        "N1mi" = "N1",
+        "N2" = "N2+",
+        "N2a" = "N2+",
+        "N2b" = "N2+",
+        "N2c" = "N2+",
+        "N3" = "N2+",
+        "N3a" = "N2+",
+        "N3b" = "N2+",
+        "N3c" = "N2+",
+        "N4" = "N2+",
+        "NX" = "NX", # TODO: Is this an NA?
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage 0a" = "Stage0",
+        "Stage 0is" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IA3" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage IIC1" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IS" = "Stage1",
+        "Stage IV" = "Stage1",
+        "Stage IVA" = "Stage1",
+        "Stage IVB" = "Stage1",
+        "Stage IVC" = "Stage1",
+        # 'Tis' are small mutated cells - some do not consider this as cancer
+        "Stage Tis" = "Stage0",
+        "Stage X" = "Stage X",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_clinical_t") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "T0" = "T0", # TODO: is this an NA?
+        "T1" = "T1",
+        "T1a" = "T1",
+        "T1a1" = "T1",
+        "T1a2" = "T1",
+        "T1b" = "T1",
+        "T1b1" = "T1",
+        "T1b2" = "T1",
+        "T1c" = "T1",
+        "T1mi" = "T1",
+        "T2" = "T2",
+        "T2a" = "T2",
+        "T2a1" = "T2",
+        "T2a2" = "T2",
+        "T2b" = "T2",
+        "T2c" = "T2",
+        "T2d" = "T2",
+        "T3" = "T3+",
+        "T3a" = "T3+",
+        "T3b" = "T3+",
+        "T3c" = "T3+",
+        "T3d" = "T3+",
+        "T4" = "T3+",
+        "T4a" = "T3+",
+        "T4b" = "T3+",
+        "T4c" = "T3+",
+        "T4d" = "T3+",
+        "T4e" = "T3+",
+        "TX" = "TX",
+        "Ta" = "T1",
+        "Tis" = "T0", # TODO: Check this too?
+        "Tis (DCIS)" = "T0",
+        "Tis (LCIS)" = "T0",
+        "Tis (Paget's)" = "T0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_m") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "M0" = "M0",
+        "M1" = "M1",
+        "M1a" = "M1",
+        "M1b" = "M1",
+        "M1c" = "M1",
+        "M1d" = "M1",
+        "M2" = "M2",
+        "MX" = "MX", # TODO: Is this an NA?
+        "cM0 (i+)" = "M0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_n") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "N0" = "N0",
+        "N0 (i+)" = "N0",
+        "N0 (i-)" = "N0",
+        "N0 (mol+)" = "N0",
+        "N0 (mol-)" = "N0",
+        "N1" = "N1",
+        "N1a" = "N1",
+        "N1b" = "N1",
+        "N1bI" = "N1",
+        "N1bII" = "N1",
+        "N1bIII" = "N1",
+        "N1bIV" = "N1",
+        "N1c" = "N1",
+        "N1mi" = "N1",
+        "N2" = "N2+",
+        "N2a" = "N2+",
+        "N2b" = "N2+",
+        "N2c" = "N2+",
+        "N3" = "N2+",
+        "N3a" = "N2+",
+        "N3b" = "N2+",
+        "N3c" = "N2+",
+        "N4" = "N2+",
+        "NX" = "NX", # TODO: Is this an NA?
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage 0a" = "Stage0",
+        "Stage 0is" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IA3" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage IIC1" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IS" = "Stage1",
+        "Stage IV" = "Stage1",
+        "Stage IVA" = "Stage1",
+        "Stage IVB" = "Stage1",
+        "Stage IVC" = "Stage1",
+        # 'Tis' are small mutated cells - some do not consider this as cancer
+        "Stage Tis" = "Stage0",
+        "Stage X" = "Stage X",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ajcc_pathologic_t") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "T0" = "T0",
+        "T1" = "T1",
+        "T1a" = "T1",
+        "T1a1" = "T1",
+        "T1a2" = "T1",
+        "T1b" = "T1",
+        "T1b1" = "T1",
+        "T1b2" = "T1",
+        "T1c" = "T1",
+        "T1mi" = "T1",
+        "T2" = "T2",
+        "T2a" = "T2",
+        "T2a1" = "T2",
+        "T2a2" = "T2",
+        "T2b" = "T2",
+        "T2c" = "T2",
+        "T2d" = "T2",
+        "T3" = "T3+",
+        "T3a" = "T3+",
+        "T3b" = "T3+",
+        "T3c" = "T3+",
+        "T3d" = "T3+",
+        "T4" = "T3+",
+        "T4a" = "T3+",
+        "T4b" = "T3+",
+        "T4c" = "T3+",
+        "T4d" = "T3+",
+        "T4e" = "T3+",
+        "TX" = "TX",  # TODO: Is this an NA?
+        "Ta" = "T1",
+        "Tis" = "T0",
+        "Tis (DCIS)" = "T0",
+        "Tis (LCIS)" = "T0",
+        "Tis (Paget's)" = "T0",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "gender") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "female" = "female",
+        "male" = "male",
+        "unknown" = NA,
+        "unspecified" = NA,
+        "not reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "vital_status") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Alive" = "Alive",
+        "Dead" = "Dead",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "prior_malignancy") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "yes" = "yes",
+        "no" = "no",
+        "unknown" = NA,
+        "not reported" = NA,
+        "Not Allowed To Collect" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "alcohol_history") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Yes" = "Yes",
+        "No" = "No",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "ann_arbor_b_symptoms") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "yes" = "yes",
+        "no" = "no",
+        "unknown" = NA,
+        "not reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "figo_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Stage 0" = "Stage0",
+        "Stage I" = "Stage1",
+        "Stage IA" = "Stage1",
+        "Stage IA1" = "Stage1",
+        "Stage IA2" = "Stage1",
+        "Stage IB" = "Stage1",
+        "Stage IB1" = "Stage1",
+        "Stage IB2" = "Stage1",
+        "Stage IC" = "Stage1",
+        "Stage IC1" = "Stage1",
+        "Stage IC2" = "Stage1",
+        "Stage IC3" = "Stage1",
+        "Stage II" = "Stage2",
+        "Stage IIA" = "Stage2",
+        "Stage IIA1" = "Stage2",
+        "Stage IIA2" = "Stage2",
+        "Stage IIB" = "Stage2",
+        "Stage IIC" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IIIA" = "Stage3+",
+        "Stage IIIA1" = "Stage3+",
+        "Stage IIIA2" = "Stage3+",
+        "Stage IIIAi" = "Stage3+",
+        "Stage IIIAii" = "Stage3+",
+        "Stage IIIB" = "Stage3+",
+        "Stage IIIC" = "Stage3+",
+        "Stage IIIC1" = "Stage3+",
+        "Stage IIIC2" = "Stage3+",
+        "Stage IV" = "Stage3+",
+        "Stage IVA" = "Stage3+",
+        "Stage IVB" = "Stage3+",
+        "Unknown" = NA,
+        "Not Reported" = NA),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "masaoka_stage") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+        "Stage I" = "Stage1",
+        "Stage IIa" = "Stage2",
+        "Stage IIb" = "Stage2",
+        "Stage III" = "Stage3+",
+        "Stage IVa" = "Stage3+",
+        "Stage IVb" = "Stage3+"),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "icd_10_code" & name == "TCGA-COAD") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+          # Colon
+        "C18.0" = "initialcolon", # Cecum
+        "C18.2" = "initialcolon", # Ascending colon
+        "C18.3" = "initialcolon", # Hepatic Flexure
+        "C18.4" = "medialcolon", # transverse colon
+        "C18.5" = "medialcolon", # splenic flexure
+        "C18.6" = "terminalcolon", # descending colon
+        "C18.7" = "terminalcolon", # sigmoid colon
+        "C18.9" = "unspecifiedcolon",
+        "C19" = "terminalcolon" # Rectosigmoid Junction
+        ),
+        warn_missing = FALSE
+      )
+    }
+    if (colname == "icd_10_code" & name == "TCGA-SKCM") {
+      model.data[[name]]$clinical[[colname]] <- revalue(
+        model.data[[name]]$clinical[[colname]], c(
+          # Melanoma
+        "C07" = "gland", # Parotid Gland
+        "C17.9" = "mucosae", # Small intestine
+        "C18.9" = "mucosae", # Unspecified colon
+        "C22.0" = "gland", # Liver cell carcinoma
+        "C34.1" = "mucosae", # Upper lobe of bronchi or lung
+        "C34.3" = "mucosae", # Lower lobe of bronchi or lung
+        "C34.9" = "mucosae", # Bronchi or lung, unspecified
+        "C41.0" = "connective", # Bone of skull and face
+        "C43.51" = "skin", # Malignant melanoma (M.m.) of anal skin
+        # I wanted to keep the head and neck skin patients separated, but
+        # there are not many of them, so I keep them all together
+        "C44.2" = "skin", # M.m. of ear
+        "C44.3" = "skin", # M.m. of face
+        "C44.31" = "skin", # M.m. of eyelid
+        "C44.4" = "skin", # M.m. of neck
+        "C44.5" = "skin", # M.m. of trunk
+        "C44.50" = "skin", # M.m. of trunk
+        "C44.6" = "connective", # Malignant neoplasm of penis
+        "C44.601" = "connective", # Malignant neoplasm of penis glans
+        "C44.7" = "skin", # Lower limb skin
+        "C44.701" = "skin", # Lower limb skin
+        "C44.9" = "skin", # Generic code for skin malignant neoplasm
+        "C48.2" = "mucosae", # Peritoneum, unspecified
+        "C49.0" = "connective", # Other connective or soft tissue of head, face or neck
+        "C49.1" = "connective", # Other connective or soft tissue of upper limb
+        "C49.2" = "connective", # Other connective or soft tissue of lower limb
+        "C49.20" = "connective", # See above
+        "C49.3" = "connective", # Other connective or soft tissue of thorax
+        "C49.4" = "connective", # Other connective or soft tissue of abdomen
+        "C49.5" = "connective", # Other connective or soft tissue of pelvis
+        "C49.6" = "connective", # Other connective or soft tissue of trunk
+        "C49.9" = "connective", # Other connective or soft tissue, unspecified
+        "C50.9" = "connective", # Unspecified breast
+        "C51.9" = "mucosae", # Malignant neoplasm of Vulva
+        "C52" = "mucosae", # Vagina
+        "C54.1" = "mucosae", # Corpus uteri, edometrium
+        "C71.1" = "nervous", # Brain, except lobes and ventricles
+        "C71.3" = "nervous", # Parietal lobe of brain
+        "C71.9" = "nervous", # Brain, unspecified
+        "C72.0" = "nervous", # CNS, spinal cord
+        "C74.9" = "gland", # Adrenal gland, unspecified
+        "C76.1" = "generic", # Other site, thorax
+        "C76.2" = "generic", # Other site, abdomen
+        "C76.3" = "generic", # Other site, pelvis
+        "C77.0" = "metastasis", # Secondary neoplasm in lymph nodes - head, face or neck
+        "C77.2" = "metastasis", # Secondary neoplasm in lymph nodes - abdominal
+        "C77.3" = "metastasis", # Secondary neoplasm in lymph nodes - axilla or upper limb
+        "C77.4" = "metastasis", # Secondary neoplasm in lymph nodes - inguinal or lower limb
+        "C77.5" = "metastasis", # Secondary neoplasm in lymph nodes - pelvis
+        "C77.9" = "metastasis" # Secondary neoplasm in lymph nodes - unspecified
+        ),
+        warn_missing = FALSE
+      )
+    }
+    # primary and secondary gleason grade are weird...
+    # I am not sure how to rename their values, but since it only applies to a single tumor,
+    # I just disregard it for now.
+  }
+}
+
+uncropped.model.data <- model.data
+
+for (name in p.names) {
+  # This is a tad dangerous, as shouldn't be run twice.
+  # TODO: Maybe add that crop.at stores that cropping level, and doesn't act
+  # twice? Probably the Tydiverse has something like this that works better.
+  model.data[[name]]$clinical %>% crop.at(90) -> model.data[[name]]$clinical
+}
+
+```
+
+### Clinical Variable availability
+
+There are several missing data points in the clinical variables. The models need complete cases, so the variables that are missing in many of the cases need to be removed.
+
+First I want to look at the availabilities for the clinical data, that is, the percentage of data points that are non-missing in each of the clinical data variables:
+
+```{r}
+get_availability <- function(clinical.data, cutoff, cut_0_mut = FALSE){
+  #' Produce a dataframe containing the relative percentage availability of clinical data
+  #'
+  #' @param x Data as created by project.py clinical frequency function
+  #' @param cutoff Remove all fields with % less than this value.
+  #' @param cut_0_mut If true, removes patients with 0 driver mutations before computing the availabilities.
+  #' @return Data frame, with one row for each variable containing the fractional availability
+  #'
+  #' The dataframe's rows are named as the variables that they represent.
+
+  if(cut_0_mut){
+    clinical.data <- subset(clinical.data, clinical.data$frequency != 0)
+  }
+  # Numbers holds the amount of non-na values in the dataframe
+  numbers <- colSums(!is.na(clinical.data))
+  numbers <- numbers/length(clinical.data[,1])*100
+  numbers <- subset(numbers, numbers >= cutoff)
+  frame <- data.frame(numbers)
+  colnames(frame) <- "fractional.availability"
+  return(frame)
+}
+
+for (name in p.names) {
+  get_availability(model.data[[name]]$clinical, cutoff=0) -> model.data[[name]]$availability
+  # I need the frame to be named as the tumor type, for a later calculation (see next block)
+  colnames(model.data[[name]]$availability) <- name
+
+  # Same for uncropped data
+  get_availability(
+    uncropped.model.data[[name]]$clinical, cutoff=0
+  ) -> uncropped.model.data[[name]]$availability
+  # I need the frame to be named as the tumor type, for a later calculation (see next block)
+  colnames(uncropped.model.data[[name]]$availability) <- name
+}
+```
+
+To visualize them better, I'll make them in a single dataframe.
+
+```{r, include=FALSE}
+availabilities <- list()
+for (name in p.names) {
+  availabilities[[name]] <- rownames_to_column(model.data[[name]]$availability, var="ID")
+}
+fused.avail <- reduce(availabilities, merge, by = "ID", all = TRUE)
+# The dataframe is actually massive. We have looked at it in excel in the meeting of the
+# 8th of March 2021, so I won't include it here.
+fused.avail
+```
+
+To show only those variables available for each tumor type, I filter the above frame to keep only those variables that are available (>90%) in all tumours.
+
+### Clinical/Pathologic overlap
+
+We prefer the ajcc codes from clinical evaluation (examined by a medical practitioner). But if they are not available, we use the pathologic values (from a simple examination).
+
+I think they are mutually exclusive. Let's check that:
+
+```{r}
+extract.avail <- function(project, percent) {
+  #' Extract the clinical variables that are at least PERCENT available from PROJECT
+  return(rownames(subset(project$availability, project$availability >= percent)))
+}
+
+mutual.exclusive.ajcc <- function(project, name) {
+  # This is terrible, but I just don't want to do it manually
+  data.vars <- extract.avail(project, 90)
+  collided <- FALSE
+  if ("ajcc_clinical_m" %in% data.vars & "ajcc_pathologic_m" %in% data.vars) {
+    print(paste("In project", name, "ajcc m collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_n" %in% data.vars & "ajcc_pathologic_n" %in% data.vars) {
+    print(paste("In project", name, "ajcc n collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_t" %in% data.vars & "ajcc_pathologic_t" %in% data.vars) {
+    print(paste("In project", name, "ajcc t collides."))
+    collided <- TRUE
+  }
+  if ("ajcc_clinical_stage" %in% data.vars & "ajcc_pathologic_stage" %in% data.vars) {
+    print(paste("In project", name, "ajcc stage collides."))
+    collided <- TRUE
+  }
+  if (!collided) {
+    print(paste("No collisions detected for", name))
+  }
+}
+
+for (name in p.interest) {
+  mutual.exclusive.ajcc(model.data[[name]], name)
+}
+```
+
+There are no collisions. This means that we need not filter for one or the other `ajcc` values.
+
+### Binary mutation Presence
+
+Martina made some models where the driver frequency is modelled by the presence or absence of some driver mutations. I have some concerns about this: aren't the variables that we want to model the same thing as the variable that describes them? In any case, I need to reshape the data to have this kind of variable. I call such data `gene_labels`.
+
+Martina mixed gene level and mutation level in her models, but I want to keep them separate. I'd need some reshaping to make the patients have a string of binary values to use as labels.
+
+```{r}
+reshape_crystal <- function(project){
+  #' Reshape a project to a gene label data frame
+  #'
+  #' Moves from a project to a large data frame containing the presence or absence
+  #' status of mutations encoded into 0 for not present and 1 for present.
+  #' Each row is a different
+  relevant <- project$crystal[,c("ID", "Renamed.HUGO", "Hugo")]
+  # I stole this from stack overflow
+  gene_labels <- relevant %>%
+    pivot_longer(ends_with("hugo"), names_to = "genes") %>%
+    complete(ID, value) %>%
+    dplyr::mutate(genes = as.numeric(!is.na(genes))) %>%
+    pivot_wider(names_from = value, values_from = genes, values_fn = max)
+  # Putting `all.x=TRUE, all.y=TRUE` makes some NAs appear, which is weird....
+  # TODO: Check if the length of the gene labels matrix is the same as the crystal,
+  # but nothing should have been lost by the trasposition
+  temp <- data.frame(ID = project$clinical[,c("ID")])
+  gene_labels <- merge(gene_labels, temp, by = "ID", all = TRUE)
+  # See disclaimer above. I think that the NAs come from 0-driver patients, that have no ID in the
+  # pivoted gene_labels table, so the real labels should be zero
+  gene_labels[is.na(gene_labels)] <- 0
+  gene_labels <- merge(gene_labels, project$clinical[, c("ID", "passenger.freq", "driver.freq")], by = "ID")
+  # These are very long vectors but with just two levels. I could cast them
+  # to factors but some functions later on fail.
+  return(gene_labels)
+}
+
+for (name in p.names) {
+  model.data[[name]]$gene_labels <- reshape_crystal(model.data[[name]])
+}
+```
+
+Now we have available as variables the presence or absence of each mutations present in the crystal. This could be useful later on.
+
+## Driver-Passenger frequency correlation
+
+> Are the number of passenger and drivers correlated with eachother?
+
+## Driver-Passenger Clinical modelling
+
+> Are the number of drivers and passenger for each patient modelled well by the clinical variables?
+
+### Description of used Clinical variables
+
+We have at our disposal the variables collected by the TCGA consortium during the sampling process. They are source directly from the GDC data portal, and associated with their respective patients.
+
+The clinical variables are detailed below. Source for this data is the GDC data dictionary. I use the Demographic, Diagnosis and Exposures clinical data. There are other types of data in the portal (Family History, Follow ups and more), but they are one-to-many (for instance, one patient might have more than one family member with cancer, or more than one follow up), so they have to be aggregated in some way. Since this is non-trivial, I ignored them (at least for now).
+
+The main variables are described here. The actual detection of which variables are available is further down this report, in the "Model Data preprocessing" section.
+
+Ignoring the data columns `driver.freq`, `passenger.freq` and `ID`, we have a total number of 39 clinical variables that are available in at least one tumor type. These are:
+
+* **Demographic**
+  * `age_at_index` : (int) The patient's age (in years) on the reference or anchor date date used during date obfuscation.
+  * `days_to_birth` : (int) Number of days between the date used for index and the date from a person's date of birth represented as a calculated negative number of days.
+  * `ethnicity` : (Enum) [__required__] An individual's self-described social and cultural grouping, specifically whether an individual describes themselves as Hispanic or Latino. The provided values are based on the categories defined by the U.S. Office of Management and Business and used by the U.S. Census Bureau.
+  * `gender` : (Enum) [__required__] Text designations that identify gender. Gender is described as the assemblage of properties that distinguish people on the basis of their societal roles. Self-reported.
+  * `race` : (Enum) [__required__] An arbitrary classification of a taxonomic group that is a division of a species. It usually arises as a consequence of geographical isolation within a species and is characterized by shared heredity, physical attributes and behavior, and in the case of humans, by common history, nationality, or geographic distribution. The provided values are based on the categories defined by the U.S. Office of Management and Business and used by the U.S. Census Bureau.
+  * `vital_status` : (Enum) [__required__] The survival state of the person registered on the protocol.
+  * `year_of_birth` : (int) Numeric value to represent the calendar year in which an individual was born.
+* **Diagnosis**:
+  * `age_at_diagnosis` : (int) [__required__] Age at the time of diagnosis expressed in number of days since birth.
+  * `ajcc_clinical_m` : (Enum) Extent of the distant metastasis for the cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * MX: Cannot be measured
+    * M0: Cancer has not spread to other parts of the body
+    * cM0 (i+): Minimal cancer spread (less than 0.2mm areas of cancer spread)
+    * M1/M1a/M1b/M1c: Cancer has spread to other parts of the body
+  * `ajcc_clinical_n` : (Enum) Extent of the regional lymph node involvement for the cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * NX: Cannot be measured
+    * N0: There is no cancer in nearby lymph nodes
+    * N1-4: Number and location of lymph nodes that show the presence of cancer cells. Several variations exist, such as N0 (1+/-), N11/b/c, etc...
+  * `ajcc_clinical_stage` : (Enum) Stage group determined from clinical information on the tumor (T), regional node (N) and metastases (M) and by grouping cases with similar prognosis for cancer. Stage I to IV, with several possible modifiers
+  * `ajcc_clinical_t` : (Enum) Extent of the primary cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * TX: Cannot be measured
+    * T0: Cannot be found
+    * T1-4: Larger stages mean large cell mass and/or penetration into tissues
+  * `ajcc_pathologic_m` : (Enum) Code to represent the defined absence or presence of distant spread or metastases (M) to locations via vascular channels or lymphatics beyond the regional lymph nodes, using criteria established by the American Joint Committee on Cancer (AJCC). Same levels as `ajcc_clinical_m`.
+  * `ajcc_pathologic_n` : (Enum) The codes that represent the stage of cancer based on the nodes present (N stage) according to criteria based on multiple editions of the AJCC's Cancer Staging Manual. Same levels as `ajcc_clinical_n`.
+  * `ajcc_pathologic_stage` : (Enum) The extent of a cancer, especially whether the disease has spread from the original site to other parts of the body based on AJCC staging criteria. Same levels as `ajcc_clinical_stage`.
+  * `ajcc_pathologic_t` : () Code of pathological T (primary tumor) to define the size or contiguous extension of the primary tumor (T), using staging criteria from the American Joint Committee on Cancer (AJCC). Same levels as `ajcc_clinical_t`.
+  * `ajcc_staging_system_edition` : (Enum) The text term used to describe the version or edition of the American Joint Committee on Cancer Staging Handbooks, a publication by the group formed for the purpose of developing a system of staging for cancer that is acceptable to the American medical profession and is compatible with other accepted classifications. There are 8 possible editions, from 1st to 8th.
+  * `ann_arbor_b_symptoms` : (Binary Enum) Text term to signify whether lymphoma B-symptoms are present as noted in the patient's medical record.
+  * `ann_arbor_extranodal_involvement` : (Enum) The text term used to describe the clinical classification of lymphoma, as defined by the Ann Arbor Lymphoma Staging System.
+  * `days_to_diagnosis`: (int) Number of days between the date used for index and the date the patient was diagnosed with the malignant disease.
+  * `days_to_last_follow_up` : (int) Time interval from the date of last follow up to the date of initial pathologic diagnosis, represented as a calculated number of days.
+  * `figo_stage` : (Enum) The extent of a cervical or endometrial cancer within the body, especially whether the disease has spread from the original site to other parts of the body, as described by the International Federation of Gynecology and Obstetrics (FIGO) stages.
+  * `icd_10_code`: (str) Alphanumeric value used to describe the disease code from the tenth version of the International Classification of Disease (ICD-10).
+  * `masaoka_stage` : (Enum) The text term used to describe the Masaoka staging system, a classification that defines prognostic indicators for thymic malignancies and predicts tumor recurrence.
+  * `morphology` : (Enum) [__required__] The third edition of the International Classification of Diseases for Oncology, published in 2000 used principally in tumor and cancer registries for coding the site (topography) and the histology (morphology) of neoplasms. The study of the structure of the cells and their arrangement to constitute tissues and, finally, the association among these to form organs. In pathology, the microscopic process of identifying normal and abnormal morphologic characteristics in tissues, by employing various cytochemical and immunocytochemical stains. A system of numbered categories for representation of data.
+  * `primary_diagnosis` : (Enum) [__required__] Text term used to describe the patient's histologic diagnosis, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `primary_gleason_grade` : (Enum) The text term used to describe the primary Gleason score, which describes the pattern of cells making up the largest area of the tumor. The primary and secondary Gleason pattern grades are combined to determine the patient's Gleason grade group, which is used to determine the aggresiveness of prostate cancer. Note that this grade describes the entire prostatectomy specimen and is not specific to the sample used for sequencing.
+  * `prior_malignancy` : (Enum)  The yes/no/unknown indicator used to describe the patient's history of prior cancer diagnosis.
+  * `prior_treatment` : (Enum) A yes/no/unknown/not applicable indicator related to the administration of therapeutic agents received before the body specimen was collected.
+  * `site_of_resection_or_biopsy` : (Enum) [__required__] The text term used to describe the anatomic site of origin, of the patient's malignant disease, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `secondary_gleason_grade` : (Enum) The text term used to describe the secondary Gleason score, which describes the pattern of cells making up the second largest area of the tumor. The primary and secondary Gleason pattern grades are combined to determine the patient's Gleason grade group, which is used to determine the aggresiveness of prostate cancer. Note that this grade describes the entire prostatectomy specimen and is not specific to the sample used for sequencing.
+  * `synchronous_malignancy` : (Binary Enum) A yes/no/unknown indicator used to describe whether the patient had an additional malignant diagnosis at the same time the tumor used for sequencing was diagnosed. If both tumors were sequenced, both tumors would have synchronous malignancies.
+  * `tissue_or_organ_of_origin` : (Enum) [__required__] The text term used to describe the anatomic site of origin, of the patient's malignant disease, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `year_of_diagnosis` : (int) Numeric value to represent the year of an individual's initial pathologic diagnosis of cancer.
+* **Exposures**:
+  * `alcohol_history` : (Binary Enum) A response to a question that asks whether the participant has consumed at least 12 drinks of any kind of alcoholic beverage in their lifetime.
+* **Follow Up**:
+  * `bmi` : (number) A calculated numerical quantity that represents an individual's weight to height ratio.
+  * `height` : (number) The height of the patient in centimeters.
+  * `weight` : (number) The weight of the patient measured in kilograms.
+
+Note that I cannot find the `tumor_stage` variable in the GDC data portal, however it looks like, from cursory inspection, that it is identical to the `ajcc_pathologic_stage`. I'm not sure where it comes from... Maybe I made it and forgot? I doubt it.
+
+I first define some helper functions that will be useful throughout the modelling process.
+
+```{r}
+extract.avail <- function(project, percent) {
+  #' Extract the clinical variables that are at least PERCENT available from PROJECT
+  return(rownames(subset(project$availability, project$availability >= percent)))
+}
+
+# This is just to print "no variables" if none are selected.
+ornone <- function(x) {
+  #' Return x if it is not empty, else return "No Variables"
+  if (length(x) > 0) {
+    return(x)
+  } else {
+    return("No Variables")
+  }
+}
+
+best <- function(glmulti) {
+  #' Extract the best model from a glmulti output
+  return(glmulti@objects[[1]])
+}
+
+exclude <- function(dframe, rows) {
+  #' Exclude ROWS from a dataframe.
+  return(dframe[-rows, ])
+}
+
+make.formula <- function(response, predictors) {
+  #' Helper to paste together a response and predictors to a formula-like string
+  return(paste(response, paste(predictors, collapse = "+"), sep = " ~ "))
+}
+```
+
+Now I make a function that automatically selects the variables of interest form the lists we defined earlier (see the `Variable Level simplification` section), and produces a model formula automatically. It also returns the model data without `NA`s, and some additonal parameters needed by the function that makes the actual models.
+
+This is not at all elegant, but I just wanted something that worked.
+
+```{r}
+select.vars <- function(project, percent = 90) {
+  #' Select the variables to use in the models
+  #'
+  #' Retains only variables that have more than one level (the others would cause the models
+  #' to crash) and those available.
+  #' Returns the cleaned model data together with the selected variables.
+  #' Also includes the data numerosity.
+  #'
+  #' The variables selected are those defined by us beforehand.
+
+  # 0 and 1 factor levels are useless. So I remove them here
+  to.remove <- c()
+  for (variable in names(project$clinical)) {
+    if (is.factor(project$clinical[[variable]]) | is.character(project$clinical[[variable]])) {
+      if (nlevels(as.factor(project$clinical[[variable]])) < 2) {
+        to.remove <- c(to.remove, variable)
+      }
+    }
+  }
+  # Selects the variables to use in the model
+  avail.vars <- extract.avail(project, percent)
+  out <- "Available variables:\n"
+  generic.vars.in <- avail.vars[avail.vars %in% selected.vars]
+  generic.vars.in <- generic.vars.in[!generic.vars.in %in% to.remove]
+  out <- paste(out, paste(generic.vars.in, collapse = " + "), "\n", sep="")
+  out <- paste(out, "Tumor-Specific Variables:\n", sep = "")
+  tspec.vars.in <- avail.vars[avail.vars %in% tumor.spec.vars]
+  tspec.vars.in <- tspec.vars.in[!tspec.vars.in %in% to.remove]
+  out <- paste(out, paste(ornone(tspec.vars.in), collapse = " + "), "\n", sep="")
+
+  cat(out)
+  completecases <- na.omit(
+    project$clinical[, c(generic.vars.in, tspec.vars.in, "ID", "passenger.freq", "driver.freq")]
+    )
+  numerosity <- length(completecases$ID)
+  print(
+    paste(
+      "Nr. vars:", length(c(generic.vars.in, tspec.vars.in)),
+      "- Numerosity:", numerosity,
+      "sqrt:", round(sqrt(numerosity), 2)
+    )
+  )
+
+  # Generate the model data
+  return(list(
+    # Cleaned data to be used in the model
+    completecases,
+    # All variables that will be tested
+    c(generic.vars.in, tspec.vars.in),
+    # Numerosities that are taken into account to select the nr. of variables to include in the model
+    floor(numerosity / 10),
+    floor(sqrt(numerosity))
+    )
+  )
+}
+
+```
+
+The lib `ggfortify` has an `autoplot` function that can be used to quickly see the model quality at a glance. So I use it now to check for model quality. I wrap it just so I can give it a title.
+
+I use `glmulti` to automate the model search process to get an overview of the models that can be produced. I'll then use these models to drive the choice for the other models
+
+My thoughts on the decisions I took when making these preliminary models are in the comments in the function itself.
+
+```{r}
+autoplot2 <- function(x, title = "") {
+  #' Autoplot, with a title
+  p <- autoplot(x)
+  return(grid.arrange(grobs = p@plots, top = title))
+}
+
+diagnose <- function(model, name = "", leverage.threshold = 0.175) {
+  print(paste("Model: ", name))
+  model %>% summary() %>% print()
+  model %>% autoplot2(title = name)
+  return(NULL)
+}
+
+make.models <- function(
+    project,
+    exclude.pts = NULL, level = 1,
+    leverage.treshold = 0.175, avail.percent = 90,
+    ignore.vars = NULL
+  ) {
+  #' Generate preliminary models for a project
+  #'
+  #' @param project The project that hosts the clinical data.
+  #' @param exclude.pts A integer vector with the row numbers of observations
+  #' that should be removed from the data before calculating the models.
+  #' @param level An integer that describes the level of the glmulti analysis.
+  #' Level 2 includes two-way interactions between variables, while 1 does not.
+  #' @param leverage.treshold Passed onto `diagnose_glmer` as leverage
+  #' threshold to warn about points with too high leverage.
+  #' @param avail.percent Considers only variables that are at least this
+  #' available (in percentile). Defaults to 90% available
+  #' @param ignore.vars A character vectors of variables to exclude a priori
+  #' from the analysis.
+  #'
+  #' Calculating level 2 models takes a long, long time.
+
+  # Unpack the output from select.vars
+  x <- select.vars(project, percent = avail.percent)
+  # Unpacking the model data...
+  if (!is.null(exclude.pts)) {
+    model.data <- exclude(x[[1]], exclude.pts)
+  } else {
+    model.data <- x[[1]]
+  }
+  # The variables that need to be used ...
+  vars <- x[[2]]
+  if (!is.null(ignore.vars)) {
+    if (any(vars %in% ignore.vars)) {
+      print("Ignoring variables")
+      vars <- vars[!vars %in% ignore.vars]
+    } else {
+      print("There are variables to ignore, but none of them are considered")
+    }
+  }
+  # And the maximum number of variables. x[[3]] is nr.obs / 10, while x[[4]] is
+  # sqrt(nr.obs). I take the smallest of the two, to be conservative for
+  # smaller n (/10 is smallest), and also for large n (sqrt is smallest)
+  max.vars <- min(x[[3]], x[[4]])
+
+  models <- list()
+
+  # A few words for all models: I set `report` and `plotty` to false to
+  # suppress the output of the glmulti calculation. I also run an exhaustive
+  # search (method = "h"). Finally, I set the analysis to respect the
+  # marginality principle, although this is useless if level = 1.
+
+  # >>> Passenger models <<<
+  # Gauss models are not fit for this shape of data.
+  # Poisson is better suited for count data.
+  print("Generating Passenger Model - Poisson")
+  models$all.pass.poiss <- glmulti(
+    y = "passenger.freq", xr = vars,
+    level = level,
+    report = FALSE, plotty = FALSE,
+    data=model.data,
+    method = "h",
+    family = poisson,
+    marginality = TRUE,
+    maxsize = x[[3]]
+  )
+  best(models$all.pass.poiss) %>% diagnose("Best Passenger Poisson")
+
+  # I tried a quasipoisson model  with glmulti but it gives a weird `cricri`
+  # error, and I think it's inside the implementation for glmulti, from looking
+  # at the source code. I don't know how to fix it, really.
+  # So I'll just make a single model with all variables from the poisson model.
+
+  print("Making quasipoisson passenger model.")
+  models$simple.pass.qpoiss <- glm(
+    formula(best(models$all.pass.poiss)), data = model.data, family = quasipoisson
+  )
+  models$simple.pass.qpoiss %>% diagnose("Best Passenger Simple Quasi Poisson")
+
+  print("Generating passenger model - Negative Binomial")
+  # The Poisson models seem overdispersed. In this case it's advisable to try
+  #binomial distribution, which handles overdispersed data.
+  models$all.pass.nb <- glmulti(
+    y = "passenger.freq", xr = vars,
+    level = level,
+    report = FALSE, plotty = FALSE,
+    data=model.data,
+    method = "h",
+    fitfunction = glm.nb,
+    marginality = TRUE,
+    maxsize = x[[3]]
+  )
+  best(models$all.pass.nb) %>% diagnose("Best Passenger NegBi")
+
+  # >>> Driver models <<<
+  # Poisson
+  print("Generating Driver Model - Poisson")
+  models$all.driver.poiss <- glmulti(
+    y = "driver.freq", xr = vars,
+    level = level,
+    report = FALSE, plotty = FALSE,
+    data=model.data,
+    method = "h",
+    family = poisson,
+    marginality = TRUE,
+    maxsize = x[[3]]
+  )
+  best(models$all.driver.poiss) %>% diagnose("Best Driver Poisson")
+
+  # Simple quasipoisson based on Poisson model, as above
+  print("Making quasipoisson Driver model.")
+  models$simple.pass.qpoiss <- glm(
+    formula(best(models$all.driver.poiss)),
+    data = model.data,
+    family = quasipoisson
+  )
+  models$simple.pass.qpoiss %>% diagnose("Best Simple Driver Quasipoiss")
+
+  print("generating Driver Model - Negative Binomial")
+  models$all.driver.nbm <- glmulti(
+    y = "driver.freq", xr = vars,
+    level = level,
+    report = FALSE, plotty = FALSE,
+    data=model.data,
+    method = "h",
+    fitfunction = glm.nb,
+    marginality = TRUE,
+    maxsize = x[[3]]
+  )
+  best(models$all.driver.nbm) %>% diagnose("Best Driver Negbi")
+
+  return(models)
+}
+```
+
+```{r}
+important.vars <- c(selected.vars, tumor.spec.vars)
+```
+
+For these five tumors, I'll use forward variable selection basing myself on variable importance as detected by the glmulti package.
+
+# TCGA-COAD models
+
+Which variables are available for this tumor type?
+
+```{r}
+select.vars(model.data$`TCGA-COAD`) -> coad
+coad[[1]] -> coaddata
+coad[[2]] -> coadvars
+
+coadmodels <- list()
+```
+
+Automatic models using glmulti
+
+```{r, warning=FALSE}
+coadmodels$automatic <- make.models(model.data$`TCGA-COAD`)
+```
+Some comments on the above models:
+* Passenger models
+  + The Poisson model shows a lot of significant variables but it is overdispersed (Residual deviance over DOF = `125.886` which is greater than 2). It also shows a very high tails for points with high passengers. This is also true for the quasipoisson model, which is based on the poisson model.
+  + The Passenger negative binomial model shows less variables, but is not overdispersed (as the negative binomial avoids overdispersion). There are some points which high leverage, though. And there is still this very high points of high passengers.
+* Driver models
+  + The driver models all seem identical, and are all pretty good.
+
+There seem to be very high tails in the residuals, so I want to look at the points, to have a rough estimate of their shape:
+
+```{r}
+ggplot(coaddata, aes(x=passenger.freq, y=driver.freq)) +
+  geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
+  ylab("Drivers") +
+  xlab("Passengers") +
+  theme_bw() +
+  scale_x_continuous(trans = scales::pseudo_log_trans(base = 10)) +
+  ggtitle("Cropped COAD")
+
+ggplot(projects$`TCGA-COAD`$clinical, aes(x=passenger.freq, y=driver.freq)) +
+  geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
+  ylab("Drivers") +
+  xlab("Passengers") +
+  theme_bw() +
+  scale_x_continuous(trans = scales::pseudo_log_trans(base = 10)) +
+  ggtitle("COAD")
+```
+
+There seem to be two different populations of points even after cropping at the 90th percentile. So I split manually the data in two sets, one with high data points, and one with low data points, and re-run the glmulti analysis. Note that I start again from the uncropped data, as not to lose the patients with very high passengers that were cropped before.
+
+```{r, warning=FALSE}
+# Low passenger freq models
+coadlowpassdata <- uncropped.model.data$`TCGA-COAD`
+coadlowpassdata$clinical <- coadlowpassdata$clinical[coadlowpassdata$clinical$passenger.freq < 300, ]
+
+get_availability(coadlowpassdata$clinical, cutoff=0) -> coadlowpassdata$availability
+
+coadmodels$automatic.lowpass <- suppressWarnings(make.models(coadlowpassdata))
+```
+The models are now perfect for the high data but become skewed in the low data.
+
+```{r}
+simplescatter <- function(clinical.data, name) {
+  set.seed(77)
+  p <- ggplot(clinical.data, aes(x=passenger.freq, y=driver.freq)) +
+  geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
+  ylab("Drivers") +
+  xlab("Passengers") +
+  theme_bw() +
+  scale_x_continuous(trans = scales::pseudo_log_trans(base = 10)) +
+  ggtitle(name)
+  return(p)
+}
+
+simplescatter(coadlowpassdata$clinical, "Low COAD")
+```
+Again, there is this population of low dots that is the probable culprit for the bad residuals.
+
+```{r, warning=FALSE}
+# High passenger freq models
+coadhighpassdata <- uncropped.model.data$`TCGA-COAD`
+coadhighpassdata$clinical <- coadhighpassdata$clinical[coadhighpassdata$clinical$passenger.freq > 300, ]
+
+get_availability(coadhighpassdata$clinical, cutoff=0) -> coadhighpassdata$availability
+
+coadmodels$automatic.highpass <- suppressWarnings(make.models(coadhighpassdata))
+```
+
+```{r}
+simplescatter(coadhighpassdata$clinical, "High COAD")
+```
+
+It seems that the poisson model is the better choice here for the passengers, and the best for the drivers is the Negative Binomial model, even though some points have high leverage. In any case, there are still a lot of skewed points towards the high passenger numbers that do not fit the rest. These are the "hypermutators" that we removed before.
+
+The glmulti analysis can provide the feature importances of the various models. Since we need which variables are more able to model well the data, I think this is an important and valuable metric to check.
+
+## Other Models
+
+Adding non-linear parameters could improve the models. So I try to run some basic models with these added parameters. I focus on the low COAD data, for now.
+
+```{r}
+# LOW COAD data
+# >>> Passenger
+# The negative binomial distribution seemed to perform better than the others
+# ignoring the low tail of residuals.
+
+select.vars(coadlowpassdata)[[1]] -> lowcoaddata
+
+coadmodels$test1 <- glmulti(
+  y = "passenger.freq", xr = c(coadvars, "I(age_at_diagnosis^2)", "log(age_at_diagnosis)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test1) %>% diagnose("Best COAD Pass test 1")
+
+coadmodels$test2 <- glmulti(
+  y = "passenger.freq", xr = c(coadvars, "I(age_at_diagnosis^2)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test2) %>% diagnose("Best COAD Pass test 2")
+
+coadmodels$test3 <- glmulti(
+  y = "passenger.freq", xr = c(coadvars, "log(age_at_diagnosis)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test3) %>% diagnose("Best COAD Pass test 3")
+```
+
+The addition of a squared or logarithmic variant of the age has no effect on the best model for passengers.
+
+```{r, warning=FALSE}
+# LOW COAD data
+# >>> Drivers
+# The negative binomial distribution seemed to perform better than the others
+# ignoring the low tail of residuals.
+
+select.vars(coadlowpassdata)[[1]] -> lowcoaddata
+
+coadmodels$test4 <- glmulti(
+  y = "driver.freq", xr = c(coadvars, "I(age_at_diagnosis^2)", "log(age_at_diagnosis)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test4) %>% diagnose("Best COAD Pass test 1")
+
+coadmodels$test5 <- glmulti(
+  y = "driver.freq", xr = c(coadvars, "I(age_at_diagnosis^2)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test5) %>% diagnose("Best COAD Pass test 2")
+
+coadmodels$test6 <- glmulti(
+  y = "driver.freq", xr = c(coadvars, "log(age_at_diagnosis)"),
+  data = lowcoaddata, fitfunction = glm.nb, plotty = FALSE, report = FALSE, level = 1
+)
+best(coadmodels$test6) %>% diagnose("Best COAD Pass test 3")
+```
+
+It seems that this holds true also for the driver models. Fit is not increased substantially in any case.
+
+## Variable importance
+
+Since we want to get a list of the most important variables in modelling the data, then variable importance is the metric to look at. It is higher if the term is used more in better-performing models, and lower otherwise. The usual threshold to mark the variable as "important" is `0.8`.
+
+```{r}
+# The best performing passenger model is NegBin
+plot(coadmodels$automatic.lowpass$all.pass.nb, type = "s")
+coadmodels$importance.lowpass <- glm.nb(passenger.freq ~ icd_10_code + prior_malignancy + age_at_diagnosis, data = lowcoaddata)
+diagnose(coadmodels$importance.lowpass)
+```
+
+Just to check if the colon levels are biased:
+
+```{r}
+coadlowpassdata$clinical$icd_10_code %>% table() %>% print()
+```
+
+There doesn't seem a large biase towards the terminal colon.
+
+```{r}
+# The driver models are all identical. I choose the negative binomial function
+# just because I did the same for the passenger.
+plot(coadmodels$automatic.lowpass$all.driver.nb, type = "s")
+coadmodels$importance.lowdriver <- glm.nb(driver.freq ~ icd_10_code + prior_malignancy + age_at_diagnosis, data = lowcoaddata)
+diagnose(coadmodels$importance.lowdriver)
+```
+
+# TCGA-BRCA models
+
+```{r}
+simplescatter(uncropped.model.data$`TCGA-BRCA`$clinical, "Uncropped BRCA")
+simplescatter(model.data$`TCGA-BRCA`$clinical, "Cropped BRCA")
+```
+
+For BRCA, a crop at the 90th percentile might be too harsh... There are only a few hypermutators.
+
+Which variables are available for this tumor type?
+
+```{r}
+select.vars(uncropped.model.data$`TCGA-BRCA`) -> brca
+brca[[1]] -> brcadata
+brca[[2]] -> bracavars
+
+brcadata %>% crop.at(90) -> croppedbrcadata
+
+brcamodels <- list()
+```
+
+Some considerations about the data:
+* It is heavily skewed towards females. This is quite obvious, but the males may have a different carcinogenesis process altogether, so I eliminate them from the females for now.
+* The ICD10 codes for this tumor are not that informative. They refer to which section of the breast the cancer arose in. I look at the levels, but it could be wise to ignore the code at this time.
+
+Automatic models using glmulti
+
+```{r, warning=FALSE}
+brcamodels$automatic <- make.models(model.data$`TCGA-BRCA`)
+```
+
+Some considerations on these models:
+* Passenger
+  + The pathologic stage and the location (1cd10 code) are the only variables that seem to be of interest. The Poisson model is again overdispersed, although the residuals are pretty good. The negative binomial model has a low tail, but it's not that marked. The points are squashed in the middle, but it's due to the distribution of the data.
+  + The best model in this case seems to be the negative binomial, as it's not overdispersed like the Poisson model.
+* Driver
+  + The driver models are all zero-inflated. There are a lot of low points that have very high residuals, and the other statistics are all skewed for low driver levels (the model overestimates the number of drivers quite significantly). Some other type of model might be better in this case, like Hurdle Models, or models that are robust for zero inflation.
+  + None look good enough to be considered viable, in my opinion.
+
+## Variable Importance
+
+Again, we look at the variable importance.
+
+```{r}
+# For passengers we said we will consider the nb model
+plot(brcamodels$automatic$all.pass.nb, type = "s")
+# I make 2 models here: one with just the variable that has high importance,
+# And another with the top four, even though they do not reach the .8 threshold.
+# A model with just a single variable is not that informative...
+brcamodels$importance.simplepass <- glm.nb(
+  passenger.freq ~ ajcc_pathologic_n, data = croppedbrcadata
+  )
+diagnose(brcamodels$importance.simplepass, "Simple Importance Passenger Model")
+
+brcamodels$importance.complexpass <- glm.nb(
+  passenger.freq ~ ajcc_pathologic_n + age_at_diagnosis + ajcc_pathologic_m +
+    ajcc_pathologic_n,
+  data = croppedbrcadata
+)
+diagnose(brcamodels$importance.complexpass, "Complex importance Passenger Model")
+```
+
+There are no good driver models so I just don't make them.
+
+# TCGA-LUAD models
+
+```{r}
+simplescatter(uncropped.model.data$`TCGA-LUAD`$clinical, "Uncropped LUAD")
+simplescatter(model.data$`TCGA-LUAD`$clinical, "Cropped LUAD")
+```
+
+As with BRCA, the 90th percentile cut might be too harsh. In any case...
+
+Which variables are available for this tumor type?
+
+```{r}
+select.vars(uncropped.model.data$`TCGA-LUAD`) -> luad
+brca[[1]] -> luaddata
+brca[[2]] -> luadvars
+
+luaddata %>% crop.at(90) -> croppedluaddata
+
+luadmodels <- list()
+```
+
+Automatic models with glmulti
+
+```{r, warning=FALSE}
+luadmodels$automatic <- make.models(model.data$`TCGA-LUAD`)
+```
+
+The models look shifted for both low and high passengers. The Poisson model is again overdispersed, so I use the nb for passengers. The Driver models have no variable that can model them well, and the best model is just the mean. In any case, maybe some variables are important.
+
+## Variable Importance
+
+We look once more at the variable importance
+
+```{r}
+# Passengers - using the negative binomial distribution
+plot(luadmodels$automatic$all.pass.nb, type = "s")
+# Same consideration I had for the BRCA model:
+# I make 2 models here: one with just the variable that has high importance,
+# And another with the top four, even though they do not reach the .8 threshold.
+# A model with just a single variable is not that informative...
+luadmodels$importance.simplepass <- glm.nb(
+  passenger.freq ~ icd_10_code, data = croppedluaddata
+  )
+diagnose(luadmodels$importance.simplepass, "Simple Importance Passenger Model")
+
+luadmodels$importance.complexpass <- glm.nb(
+  passenger.freq ~ icd_10_code + ajcc_pathologic_t + gender + vital_status, data = croppedluaddata
+  )
+diagnose(luadmodels$importance.complexpass, "Complex Importance Passenger Model")
+
+# Gender and vital status are useless
+luadmodels$importance.complexpass2 <- glm.nb(
+  passenger.freq ~ icd_10_code + ajcc_pathologic_t, data = croppedluaddata
+  )
+diagnose(luadmodels$importance.complexpass2, "Complex Importance Passenger Model 2")
+```
+
+# TCGA-SKCM models
+
+```{r}
+simplescatter(uncropped.model.data$`TCGA-SKCM`$clinical, "Uncropped SKCM")
+simplescatter(model.data$`TCGA-SKCM`$clinical, "Cropped SKCM")
+```
+
+The crop here is necessary. However, a net division between high and low dots is not clear cut, so I cannot place an arbitrary split in the data to observe the two populations like COAD.
+
+Which variables are available for this tumor type?
+
+```{r}
+select.vars(uncropped.model.data$`TCGA-SKCM`) -> skcm
+skcm[[1]] -> skcmdata
+skcm[[2]] -> skcmvars
+
+skcmdata %>% crop.at(90) -> croppedskcmdata
+
+skcmmodels <- list()
+```
+
+There are a lot of `icd_10_code`s for this tumor type. I list them here just to see if they are biased (and they probably will be):
+
+```{r}
+uncropped.model.data$`TCGA-SKCM`$clinical$icd_10_code %>% table() -> skcm.icd10table.uncropped
+model.data$`TCGA-SKCM`$clinical$icd_10_code %>% table() -> skcm.icd10table.cropped
+skcm.icd10table.uncropped - skcm.icd10table.cropped -> skcm.icd10table.diffs
+rbind(skcm.icd10table.uncropped, skcm.icd10table.cropped, skcm.icd10table.diffs)
+```
+
+Most of the "hypermutators" are metastases. This is very interesting, and might be a sign that hypermutators are just very late-stage tumors. It might be worthwhile doing a separate models just for the metastatic patients.
+
+Automatic models with glmulti
+
+```{r, warning=FALSE}
+skcmmodels$automatic <- make.models(model.data$`TCGA-SKCM`)
+```
+
+The models look shifted for both low and high passengers. The Negative binomial Passengers are hoever good for both those types of data, and are not overdispersed (of course). For the driver models, the models are identical in shape. I again choose to use the negative binomial distribution just because I already used it for the passenger distributions.
+
+## Variable Importance
+
+We look once more at the variable importance
+
+```{r}
+# Passengers - using the negative binomial distribution
+plot(skcmmodels$automatic$all.pass.nb, type = "s")
+# I also include gender as it has quite high importance.
+skcmmodels$importance.pass <- glm.nb(
+  passenger.freq ~ ajcc_pathologic_n + vital_status + gender, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.pass, "Importance Passenger Model")
+
+```
+
+The driver importances are all less than the treshold. I therefore use backwards variable selection manually.
+
+```{r}
+# Drivers
+plot(skcmmodels$automatic$all.driver.nbm, type = "s")
+skcmmodels$importance.driver1 <- glm.nb(
+  passenger.freq ~ gender + ajcc_pathologic_n + ajcc_pathologic_m + ajcc_pathologic_t + age_at_diagnosis + prior_malignancy + vital_status, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.driver1, "Importance Driver Model1")
+# I use the average of the factors to determine the P-value of factors.
+# Remove age_at_diagnosis
+skcmmodels$importance.driver2 <- glm.nb(
+  passenger.freq ~ gender + ajcc_pathologic_n + ajcc_pathologic_m + ajcc_pathologic_t + prior_malignancy + vital_status, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.driver2, "Importance Driver Model2")
+# Remove pathologic_m
+skcmmodels$importance.driver3 <- glm.nb(
+  passenger.freq ~ gender + ajcc_pathologic_n + ajcc_pathologic_t + prior_malignancy + vital_status, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.driver3, "Importance Driver Model3")
+# Remove pathologic_t
+skcmmodels$importance.driver4 <- glm.nb(
+  passenger.freq ~ gender + ajcc_pathologic_n + prior_malignancy + vital_status, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.driver4, "Importance Driver Model4")
+# Remove prior malignancy
+skcmmodels$importance.driver5 <- glm.nb(
+  passenger.freq ~ gender + ajcc_pathologic_n + vital_status, data = croppedskcmdata
+  )
+diagnose(skcmmodels$importance.driver5, "Importance Driver Model5")
+```
+
+This driver model is not terrible.
+
+# TCGA-GBM models
+
+```{r}
+simplescatter(uncropped.model.data$`TCGA-GBM`$clinical, "Uncropped GBM")
+simplescatter(model.data$`TCGA-GBM`$clinical, "Cropped GBM")
+```
+
+The cropping is decent here, as there are just a few hypermutators.
+
+Which variables are available for this tumor type?
+
+```{r}
+select.vars(uncropped.model.data$`TCGA-GBM`) -> gbm
+gbm[[1]] -> gbmdata
+gbm[[2]] -> gbmdvars
+
+gbmdata %>% crop.at(90) -> croppedgbmdata
+
+gbmmodels <- list()
+```
+
+There are only three variables. Even if we reduce the threshold for the availability to less than 90%, more variables of interest do not pop up.
+
+Let's take a look at the icd10 code:
+
+```{r}
+croppedgbmdata$icd_10_code %>% table()
+```
+
+Most datapoints are of unspecified location. So this parameter isn't at all relevant. I ignore it in the models.
+
+Automatic models with glmulti
+
+```{r, warning=FALSE}
+gbmmodels$automatic <- make.models(model.data$`TCGA-GBM`, ignore.vars = "icd_10_code")
+```
+
+The models look shifted for both low and high passengers. The Poisson model is again overdispersed, so I use the nb for passengers. The Driver models have no variable that can model them well, and the best model is just the mean. In any case, maybe some variables are important.
+
+## Variable Importance
+
+We look once more at the variable importance. I do this for completedness, but with only three variables we might as well use all of them.
+
+```{r}
+# Passengers - using the negative binomial distribution
+plot(gbmmodels$automatic$all.pass.nb, type = "s")
+plot(gbmmodels$automatic$all.driver.n, type = "s")
+```
