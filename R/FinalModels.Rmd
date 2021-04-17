@@ -1,0 +1,1669 @@
+---
+title: "Final R models"
+output:
+  pdf_document: default
+  html_notebook: default
+fig_width: 6
+fig_height: 4
+---
+
+# Preamble
+
+As per usual, we begin by loading some libraries.
+
+```{r global options, include = FALSE}
+# Do not include warnings in the output PDF
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+```{r, echo=TRUE, results='hide'}
+library(plyr) # Data shape casting (needs to be loaded before dplyr)
+library(tidyverse)
+# Tidyverse loads ggplot2, purrr, tibble, dplyr, tidyr, stringr, readr and forcats
+# This suppresses the warning that summarise makes about grouping.
+options(dplyr.summarise.inform = FALSE)
+library(reshape2) # Data melt and cast
+library(glmulti) # Multimodel inference
+library(cowplot) # Margin plots made (a bit) easier
+library(ggfortify) # `autoplot` for glms
+library(clusterSim) # Index.DB and other measures
+library(gridExtra) # Stuff like grid.arrange
+
+# The docstring package is entirely optional but it allows me to print out help messages
+# as I write more code, so it's nice as I often forget what my own functions do...
+library(docstring)
+```
+
+Other packages that need to be installed (I call them sporadically without bringing them into scope):
+```{r}
+test_installed <- function (package) {
+  if(!package %in% installed.packages()) {
+    stop("Package '", package, "' is not installed.")
+  }
+}
+test_installed("ggrepel") # Add labels over scatterplots
+test_installed("jtools") # Provides easy effect plots
+test_installed("MASS") # glm.nb implementation - but it masks `select` from dplyr
+```
+
+
+# Loading data
+
+Data preprocessing has already occurred. Please take a look at the `chasm_data_preprocessing.R` script in the GitHub. I only load the smaller dataset, with just the five tumor types of interest.
+
+```{r}
+load("F:/Data/University/Thesis/Data/CHASMplus/reduced_preprocessed_CHASM_data.Rdata")
+# Rename the data to be more concise
+projects <- reduced.projects
+rm(reduced.projects)
+
+p.names <- names(projects)
+
+# I save the tumor type in the clinical data as an attribute, as basically every function
+# that takes the clinical data also needs it (like, for plotting)
+# This way, I don't need to pass it manually every time, but just extract it from the data
+# itself.
+for (name in p.names) {
+  attr(projects[[name]]$clinical, "project.id") <- name
+}
+```
+
+# Additional Preprocessing
+
+## Variable availability
+
+We again remove the variables that are less than 90% available. With availability we mean the percentage of patients that have non-NA values under that variable. This time however, the `ajcc` values have been preprocessed to eliminate the "Not measurable" values (i.e. `nx`, `mx` and `tx`, as well as `Stage X`). This forces us to reduce the threshold to 80% to preserve most of them, or we wouldn't have any variables to test with.
+
+I save these reduced clinical dataframes to a new variable, in order to not lose the removed information alltogether.
+
+```{r}
+get_availability <- function(clinical.data, cut_0_mut = FALSE){
+  #' Produce a named vector containing the availability of clinical data
+  #'
+  #' @param x Data as created by project.py clinical frequency function
+  #' @param cut_0_mut If true, removes patients with 0 driver mutations before
+  #' computing the availabilities.
+  #'
+  #' Note that the function expects a passenger.freq
+
+  if(cut_0_mut){
+    clinical.data <- subset(clinical.data, clinical.data$frequency != 0)
+  }
+  # Numbers holds the amount of non-na values in the dataframe
+  numbers <- colSums(!is.na(clinical.data))
+  numbers <- numbers/length(clinical.data[,1])
+  return(numbers)
+}
+
+for (name in p.names) {
+  avails <- get_availability(projects[[name]]$clinical)
+  avails[avails >= 0.8] %>% names() -> available.vars
+  projects[[name]]$clinical %>% dplyr::select(all_of(available.vars)) ->
+    projects[[name]]$cleanclinical
+}
+```
+
+I select only the clinical variables of interest for the analysis:
+
+```{r}
+all.vars <- c(
+  "gender", "vital_status", "age_at_diagnosis", "icd_10_code",
+  "prior_malignancy", "alcohol_history", "bmi", "ajcc_clinical_m",
+  "ajcc_clinical_n", "ajcc_clinical_t", "ajcc_clinical_stage",
+  "ajcc_pathologic_m", "ajcc_pathologic_n", "ajcc_pathologic_t",
+  "ajcc_pathologic_stage",
+  # I add the ID for later
+  "ID",
+  # Passenger and driver frequencies
+  "passenger.freq", "driver.freq"
+)
+
+for (name in p.names) {
+  projects[[name]]$cleanclinical %>% dplyr::select(any_of(all.vars)) ->
+    projects[[name]]$cleanclinical
+}
+```
+
+For the next steps I require the data to be NA-less, so I remove all of them now.
+
+```{r}
+for (name in p.names) {
+  len.before <- length(projects[[name]]$clinical[, 1])
+  projects[[name]]$cleanclinical %>% na.omit() -> projects[[name]]$cleanclinical
+  print(
+    paste(
+      "Percentage of data retained (", name, "):",
+      round(length(projects[[name]]$clinical[, 1]) / len.before * 100, 2),
+      "%"
+    )
+  )
+}
+```
+
+## AJCC levels simplification
+
+The `ajcc` levels are too many and are probably correlated in some way. Including too many variables in models is detrimental, and therefore we combine them in a single string of the type `NXMXTX` and treat that as a single variable.
+
+First things first, we need to make sure that all tumor types *have* the `ajcc` variables:
+
+```{r}
+for (name in p.names) {
+  projects[[name]]$cleanclinical %>% dplyr::select(starts_with("ajcc_")) %>%
+    colnames() -> x
+  print(name)
+  print(x)
+}
+```
+
+Glioblastoma doesn't have the `ajcc` stages. LUAD misses the `m` staging (it's only 65% available). Additionally, they only have the pathologic versions. I combine the tumors (except GBM) to the single string:
+
+```{r}
+for (name in p.names[!p.names %in% c("TCGA-GBM")]) {
+  # This is pretty bad but ehh...
+  clinical.data <- projects[[name]]$cleanclinical
+  clinical.data$combined.ajcc <-
+    paste(
+      as.character(clinical.data$ajcc_pathologic_n),
+      as.character(clinical.data$ajcc_pathologic_m),
+      as.character(clinical.data$ajcc_pathologic_t),
+      sep = ""
+    )
+  clinical.data$combined.ajcc %>% as.factor() -> clinical.data$combined.ajcc
+  clinical.data -> projects[[name]]$cleanclinical
+}
+rm(clinical.data)
+```
+
+# Descriptive Analysis
+
+> What is the shape of the data?
+
+## Basic Summary Statistics
+
+Basic statistics (`summary` is a bit messy as it considers all variables). In order to reduce noise in the models, levels that show very little patients could be removed in order to reduce the number of variables in the model. First, however, the levels must be shown. I select some variables of interest that are useful to print out.
+
+```{r}
+# Sometimes, there are no males, so the function would error, so we need a
+# "safe" extract
+extract_safe <- function(t, what, default = 0) {
+  #' Safely extract variables
+  #'
+  #' Extract from a dataframe T a variable WHAT. If it's missing, return
+  #' DEFAULT instead
+  tryCatch(t[[what]], error = function(e) default)
+}
+
+get.name <- function(clinical) {
+  #' Helper function to get the name of a clinical dataframe
+  return(attr(clinical, "project.id"))
+}
+
+
+sum_clin <- function(clinical.data){
+  # Get a custom summary for the clinical data
+  #
+  # Get some statistics about clinical data. Includes overall numerosity,
+  # driver numerosity, means and standard deviations for passenger/driver
+  # distributions, and more.
+  name <- get.name(clinical.data)
+  data <- clinical.data
+  totn <- length(data$ID)
+  n0mut <- length(data$ID[data$driver.freq == 0])
+  perc0mut <- n0mut/totn*100
+  sex <- table(data$gender)/totn*100
+
+  obj <- data.frame(
+    # tumor metadata
+    ID = name,
+    # Numerosities
+    numerosity = totn,
+    numerosity.0.drivers = n0mut,
+    percent.0.drivers = n0mut/totn*100,
+    # Driver distributions
+    mean.driver.nr = mean(data$driver.freq),
+    median.driver.nr = median(data$driver.freq),
+    sd.driver.nr = sd(data$driver.freq),
+    driver.var.coff = sd(data$driver.freq) / mean(data$driver.freq),
+    # Passenger distributions
+    mean.passenger.nr = mean(data$passenger.freq),
+    median.passenger.nr = median(data$passenger.freq),
+    sd.passenger.nr = sd(data$passenger.freq),
+    passenger.var.coff = sd(data$passenger.freq) / mean(data$passenger.freq),
+    # Sex
+    percent.reported.male = signif(extract_safe(sex, "male"), digits=4),
+    # Age
+    mean.age.years = mean((-data$days_to_birth)/365.25, na.rm = TRUE),
+    sd.age.years = sd((-data$days_to_birth)/365.25, na.rm = TRUE)
+  )
+  class(obj) <- "clinical_summary"
+
+  return(obj)
+}
+
+get.name <- function(clinical) {
+  #' Helper function to get the name of a clinical dataframe
+  return(attr(clinical, "project.id"))
+}
+
+print.clinical_summary <- function(clin.stats){
+  # Pretty print the clinical data summary
+  #
+  # Takes the clinical data, and well, prints it but better.
+  l <- function(x){return(signif(x, digits = 4))}
+  cat(paste(
+    "Statistics for clinical data - ", clin.stats$ID, "\n", "\n",
+    "Numerosities:\n",
+    "\tNumber of patients :          ", clin.stats$numerosity, "\n",
+    "\tNr. of pat. with no drivers : ", clin.stats$numerosity.0.drivers, "\n",
+    "\t% of pat. with no drivers :   ", l(clin.stats$percent.0.drivers), " %\n",
+    "Driver Distribution:\n",
+    "\tMean Driver frequency :       ", l(clin.stats$mean.driver.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.driver.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$driver.var.coff), "\n",
+    "Passenger Distribution:\n",
+    "\tMean passenger frequency :    ", l(clin.stats$mean.passenger.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.passenger.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$passenger.var.coff), "\n",
+    "\tMedian passenger frequency:   ", l(clin.stats$median.passenger.nr), "\n",
+    "\n",
+    "% reported male:  ", clin.stats$percent.reported.male, " %\n",
+    "Mean Age (years): ", l(clin.stats$mean.age.years), "\n",
+    "SD age (years):   ", l(clin.stats$sd.age.years),
+    sep=""
+  ))
+}
+
+descriptive.stats <- list()
+
+for (name in p.names) {
+  # I keep only patients that are in the cleanclinical frame after the filtering
+  # So that the summaries actually show the patients that will be used in the
+  # models. This wasn't obvious before.
+  projects[[name]]$clinical %>%
+    filter(ID %in% projects[[name]]$cleanclinical$ID) %>%
+    sum_clin() ->
+    descriptive.stats[[name]]
+}
+
+for (name in p.names) {
+  descriptive.stats[[name]] %>% print()
+  cleanclinical.data <- projects[[name]]$cleanclinical
+  for (colname in colnames(cleanclinical.data)) {
+    if (is.factor(cleanclinical.data[[colname]]) & colname != "ID") {
+      table(cleanclinical.data[[colname]]) %>%
+        print() %>% capture.output() %>% paste(collapse="\n") ->
+        output.str
+      cat(paste("\n\nFactor", colname, "levels:", output.str))
+    }
+  }
+
+  # Just some visual separator
+  cat("\n\n--------------------------------\n\n")
+}
+```
+
+The data is slightly more skewed for the male cohort, except for BRCA (obviously) and COAD. Numerosity is high in all of the tumors.
+
+Considering the levels, we arrived at the conclusion to not used the `icd_10_code` and the `combined_ajcc` or the single `ajcc` values, and instead opt to use just the `ajcc_stage`.
+
+# Models
+
+Some generic function definitions:
+
+```{r}
+autoplot2 <- function(x, title = "") {
+  #' Autoplot, with a title
+  p <- autoplot(x)
+  return(grid.arrange(grobs = p@plots, top = title))
+}
+
+diagnose <- function(model, name = "", leverage.threshold = 0.175) {
+  print(paste("Model: ", name))
+  model %>% summary() %>% print()
+  model %>% autoplot2(title = name)
+  return()
+}
+
+plotjitter <- function(
+    clinical.data,
+    x = "passenger.freq",
+    y = "driver.freq",
+    ylabel = paste("Number of Driver Mutations"),
+    xlabel = paste("Number of Passenger Mutations"),
+    na.rm = TRUE,
+    boxplots.fill.colour = "lightgreen",
+    outlier.alpha = 0.5,
+    title = paste("Driver vs Passenger Mutations"),
+    distribution.breaks = c("red" = 10, "purple" = 25, "blue" = 50, "purple" = 75, "red" = 90)
+  ){
+  #' Make a ggplot plotting one variable against another
+  #'
+  #' Specifically intended for driver vs passenger scatterplots, but it can,
+  #' in theory, used for any two numerical variables.
+  #' It makes a jitterplot with a very small y axis jitter (where drivers
+  #' are usually plotted), and no x jitter, and adds margin boxplots
+  #' that show the overall x and y distributions.
+  #' @param clinical.data The data.frame that holds the clinical data.
+  #' @param x A string with the colname of the variable to plot in the x axis.
+  #' @param y A string with the colname of the variable to plot in the y axis.
+  #' @param ylabel The label for the y axis.
+  #' @param xlabel The label for the x axis.
+  #' @param na.rm Bool. Should the NAs be removed from the dataframe (via
+  #' na.omit) before drawing the plot?
+  #' @param boxplot.fill.color The colour of the inner sides of the boxplots.
+  #' @param outlier.alpha The alpha level (transparency) of the outlier dots
+  #' in the boxplots.
+  #' @param title The title of the plot
+  #' @param distribution.breaks A named vector with percentile numbers as values
+  #' and colours as names. Will draw vertical (y-parallel) lines at the
+  #' corresponding x quantiles with the specified colours. Useful to show the
+  #' distribution of the data differently than the "standard" boxplot.
+  #' Pass `NULL` to disable the vertical lines.
+  if(na.rm){
+    clinical.data %>% na.omit() -> clinical.data
+  }
+  base.plot <- ggplot(clinical.data, aes(y=.data[[y]], x=.data[[x]])) +
+    geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
+    xlab(xlabel) +
+    ylab(ylabel) +
+    theme_minimal() +
+    scale_x_log10() +
+    ggtitle(title)
+
+  if (!is.null(dist)) {
+    for (i in seq(from = 1, to = length(distribution.breaks))) {
+      base.plot <- base.plot +
+        geom_vline(
+          xintercept = quantile(clinical.data[[x]], distribution.breaks[i]/100),
+          color = names(distribution.breaks[i]), alpha=0.5)
+    }
+  }
+
+  # Re-adding the log10 scale generates a warning, but it's useless. So I suppress it.
+  suppressMessages(
+    x.box <- axis_canvas(base.plot, axis = "x", coord_flip = TRUE) +
+      scale_y_log10() +
+      stat_boxplot(
+        data = clinical.data, aes(y = .data[[x]], x = 1), geom ='errorbar'
+        ) +
+      geom_boxplot(
+        data = clinical.data, aes(y = .data[[x]], x = 1),
+        fill = boxplots.fill.colour,
+        outlier.alpha = outlier.alpha
+        ) +
+      coord_flip()
+  )
+  y.box <- axis_canvas(base.plot, axis = "y") +
+    stat_boxplot(
+      data = clinical.data, aes(y = .data[[y]], x = 1), geom ='errorbar'
+      ) +
+    geom_boxplot(
+      data = clinical.data, aes(y = .data[[y]], x = 1),
+      fill = boxplots.fill.colour, outlier.alpha = outlier.alpha
+      )
+
+  empty <- ggdraw()
+
+  base.plot %>%
+    insert_xaxis_grob(x.box, grid::unit(7, "mm"), position = "top") %>%
+    insert_xaxis_grob(empty, grid::unit(2, "mm"), position = "top") %>%
+    insert_yaxis_grob(y.box, grid::unit(7, "mm"), position = "right") %>%
+    insert_yaxis_grob(empty, grid::unit(2, "mm"), position = "right") ->
+    final.plot
+
+  return(ggdraw(final.plot))
+}
+
+best <- function(glmulti) {
+  #' Extract the best model from a glmulti output
+  return(glmulti@objects[[1]])
+}
+```
+
+Variable Initialization:
+```{r}
+# I make a single list to hold all models.
+# It looks like R makes automatic lists if we use the $ operator, so no
+# need to initialize the single lists for all models.
+models <- list()
+```
+
+## TCGA-COAD
+
+First, A look at the distribution of points, again.
+
+```{r}
+plotjitter(projects$`TCGA-COAD`$cleanclinical, outlier.alpha = 0.5)
+```
+
+There seem to be two populations of points here, one with high passenger frequencies, and one with low frequencies. I'll model the two separately. There also seems to be a lower population of patients, which might be worth to divide into their own sub-population.
+
+I'll take a look at the available variables for the model.
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>% colnames()
+```
+
+The only variables of interest are `age_at_diagnosis`, `driver.freq` and `ajcc_pathologic_stage`. I also include `prior_malignancy` as a predictor, but it will probably not be important.
+
+### Generic Passenger Models
+
+First we start by modelling the passenger frequencies. The models will, importantly, also consider the driver frequencies, which is our main question.
+
+I first start by considering all points. We know that these models turn out distorted, but I do them for completeness.
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$pass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial")
+```
+
+There is this very high tail of high points, as expected.
+
+```{r}
+plot(models$coad$pass$negbi0, type = "s")
+```
+
+No need to make a model on its own, as the best model above is already the model with those variables.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$pass$qps0} %>%
+    diagnose(name = "Passenger Quasipoisson 0")
+
+# Age is bad
+
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    passenger.freq ~ driver.freq + ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$pass$qps1} %>%
+    diagnose(name = "Passenger Quasipoisson 1")
+
+# Prior malignancy is bad
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    passenger.freq ~ driver.freq + ajcc_pathologic_stage,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$pass$qps2} %>%
+    diagnose(name = "Passenger Quasipoisson 2")
+```
+
+The model is terrible, both from the point of view of the residuals and the dispersion parameters. However, the reason is just the high points that fall out of the distribution.
+
+### High Passenger Models
+
+#### Negative Binomial
+
+We run a negative binomial and quasipoisson model for the passenger frequency.
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq > 300) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$highpass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (high)")
+```
+
+The model fits farely well, except for very high points. Let's see the variable importance for this high - COAD data.
+
+```{r}
+plot(models$coad$highpass$negbi0, type = "s")
+```
+
+the best model already has the two most important variables, so I don't make it manually again here.
+
+#### Quasi Poisson
+
+Now, to try a Quasi Poisson MAM:
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq > 300) ->
+  coadhighdata
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage + prior_malignancy,
+  data = coadhighdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$highpass$qps0} %>%
+  diagnose(name = "Passenger Quasipoisson high 0")
+
+# Prior Malignancy is bad
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage,
+  data = coadhighdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$highpass$qps1} %>%
+  diagnose(name = "Passenger Quasipoisson high 1")
+
+# Age at diagnosis is bad
+glm(
+  passenger.freq ~ driver.freq + ajcc_pathologic_stage,
+  data = coadhighdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$highpass$qps2} %>%
+  diagnose(name = "Passenger Quasipoisson high 2")
+
+rm(coadhighdata)
+```
+
+The quasipoisson model is overdispersed, again.
+
+### Low-central Pssenger Models
+
+#### Negative Binomial
+
+Now we do it again but with the rest of the COAD population.
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$lowcentralpass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (low)")
+```
+We again see what we noticed before. The low population distorts the model somewhat.
+
+```{r}
+plot(models$coad$lowcentralpass$negbi0, type = "s")
+```
+
+The only variable that shows some importance is the driver frequency. Here's the model with just that variable:
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) %>%
+  glm.nb(passenger.freq ~ driver.freq, data = .) %>%
+  {. ->> models$coad$lowcentralpass$importance.qps0} %>%
+  diagnose(name = "Passenger QPS Important Variables")
+```
+
+#### QuasiPoisson
+
+For completeness, I also make a MAM for the quasi poisson model:
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) ->
+  coadlowcentraldata
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage + prior_malignancy,
+  data = coadlowcentraldata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$lowcentralpass$qps0} %>%
+  diagnose(name = "Passenger Quasipoisson LowCentral 0")
+
+# Pathologic stage is (slighlty) bad
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + prior_malignancy,
+  data = coadlowcentraldata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$lowcentralpass$qps1} %>%
+  diagnose(name = "Passenger Quasipoisson LowCentral 1")
+
+rm(coadlowcentraldata)
+```
+
+The quasipoisson model is not distorted by the low dots but still shows some overdispersion.
+
+### Central Pssenger Models
+
+The models for the low-central population have the problem of the population of low dots. I'll try to remove the very low population of dots also, and check the central population only. Note that the threshold here is arbitrary.
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) %>%
+  filter(passenger.freq > 50) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$centralpass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (central)")
+
+plot(models$coad$centralpass$negbi0, type = "s")
+```
+
+The model with just the most important variables:
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) %>%
+  filter(passenger.freq > 50) %>%
+  glm.nb(passenger.freq ~ driver.freq + age_at_diagnosis,
+         data = .) %>%
+  {. ->> models$coad$centralpass$importancenegbi0} %>%
+  diagnose(name = "Passenger NegBi Most important variables")
+```
+
+The model seems much better than before. Even though there are still some points at the very low end of the spectrum that do not fit well, it's good.
+
+#### Quasi Poisson
+
+We again do a quasi poisson MAM of the central data.
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 300) %>%
+  filter(passenger.freq > 50) ->
+  coadcentraldata
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage + prior_malignancy,
+  data = coadcentraldata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$centralpass$qps0} %>%
+  diagnose(name = "Passenger Quasipoisson Central 0")
+
+# Prior Malignancy is bad
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage,
+  data = coadcentraldata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$centralpass$qps1} %>%
+  diagnose(name = "Passenger Quasipoisson Central 1")
+
+# I'll try to remove the stage, which seems borderline
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq,
+  data = coadcentraldata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$centralpass$qps2} %>%
+  diagnose(name = "Passenger Quasipoisson Central 2")
+
+rm(coadcentraldata)
+```
+
+Same things as before. The model is generally good, but seems to be overdispersed.
+
+### Low Passenger Models
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 50) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$lowpass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (low)")
+
+plot(models$coad$centralpass$negbi0, type = "s")
+```
+There are very free dots, but the distribution fits well. There is no need to make a second model as the best glmulti model is already with the most important variables.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  filter(passenger.freq <= 50) ->
+  coadlowdata
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage + prior_malignancy,
+  data = coadlowdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$lowpass$qps0} %>%
+  diagnose(name = "Passenger Quasipoisson Low 0")
+
+# Prior malignancy is pretty bad
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq + ajcc_pathologic_stage,
+  data = coadlowdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$lowpass$qps1} %>%
+  diagnose(name = "Passenger Quasipoisson Low 1")
+
+# Stage is pretty bad
+
+glm(
+  passenger.freq ~ age_at_diagnosis + driver.freq,
+  data = coadlowdata,
+  family = quasipoisson
+  ) %>%
+  {. ->> models$coad$lowpass$qps2} %>%
+  diagnose(name = "Passenger Quasipoisson Low 2")
+```
+
+The quasipoisson model is pretty good, and only slightly overdispersed. It's not that surprising, however, since there are so few points. The point `14` has high leverage, so I'll try to remove it.
+
+```{r}
+coadlowdata %>%
+  slice(-14) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + driver.freq,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$lowpass$qps2} %>%
+    diagnose(name = "Passenger Quasipoisson Low 3")
+
+rm(coadlowdata)
+```
+The model is not much different. However the residual deviance was lowered by a little bit.
+
+### Driver models
+
+For drivers, I use the whole dataset.
+```{r}
+models$coad$driver <- list()
+```
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$coad$driver$negbi0} %>%
+  best() %>% diagnose(name = "Best Driver Negative Binomial")
+
+print(models$coad$driver$negbi0, type = "s")
+```
+
+The high tail in the outliers hints at two things: There is a lot of zero inflation, OR the distribution is bad. I'm hoping that quasi poisson solves the problem.
+
+#### Quasi Poisson
+```{r}
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    driver.freq ~ age_at_diagnosis + ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$driver$qps0} %>%
+    diagnose(name = "Driver Quasipoisson 0")
+
+# Age is pretty bad
+
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    driver.freq ~ ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$driver$qps1} %>%
+    diagnose(name = "Driver Quasipoisson 1")
+
+# Prior malignancy now is no longer significant
+
+projects$`TCGA-COAD`$cleanclinical %>%
+  glm(
+    driver.freq ~ ajcc_pathologic_stage,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$coad$driver$qps2} %>%
+    diagnose(name = "Driver Quasipoisson 2")
+```
+
+The model has slightly bad residuals but is overall good.
+
+## TCGA-BRCA
+
+We follow more or less what we did for the COAD model. First, a look at the distribution.
+
+```{r}
+plotjitter(
+  projects$`TCGA-BRCA`$cleanclinical,
+  distribution.breaks = c(
+    red = 10, purple = 25, blue = 50, purple = 75, red = 90, darkgreen = 95
+    )
+  )
+```
+
+There seems to be some outliers in the passenger distribution, at both ends. I'll crop out the outliers, at the 90th percentile (the rightmost red line above). The dark green line is the 95th percentile, which I'll test also.
+
+Let's see the available variables.
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>% colnames()
+```
+
+I'll use the `age_at_diagnosis`, `prior_malignancy`, `ajcc_pathologic_stage` and `driver.freq` variables, similar to what I did for the COAD tumor.
+
+### Passenger Models
+
+#### Negative Binomial
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9)) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$brca$pass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (90 percentile)")
+```
+
+Just for curiosity, let's try to crop the distribution less, at the 95th percentile.
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$brca$pass$negbi1} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (95 percentile)")
+```
+
+Some of the model variables become more significant with the outliers, with the model residuals not becoming significantly distorted. There is however some far points in the scale-location and residuals vs fitted plots, but it's not terrible. Let's try not to crop the data at all. I expect some outliers in the high quantiles.
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$brca$pass$negbi2} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial (all data)")
+```
+
+The model gets considerably worse as the p-values go down. I think I'll keep the reasonable crop at the 95th percentile as "good".
+
+Let's look at the variable importance of that model:
+
+```{r}
+plot(models$brca$pass$negbi1, type = "s")
+```
+Making the model with the two important variables, at the 95th percentile:
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm.nb(
+    passenger.freq ~ driver.freq + age_at_diagnosis,
+    data = .
+    ) %>%
+  {. ->> models$brca$pass$important0} %>%
+  diagnose(name = "Best Passenger Importance Negative Binomial")
+```
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + ajcc_pathologic_stage + prior_malignancy + driver.freq,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$brca$pass$qps0} %>%
+    diagnose(name = "Passenger Quasipoisson 0")
+
+# Prior_malignancy is bad
+
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + ajcc_pathologic_stage + driver.freq,
+    data = .,
+    family = quasipoisson
+    ) %>%
+    {. ->> models$brca$pass$qps0} %>%
+    diagnose(name = "Passenger Quasipoisson 0")
+```
+
+The residuals for the QPS model are pretty bad, overestimated both at the low an high ends of the population. The models are also overdispersed.
+
+### Driver Models
+
+For driver models I just use the `age_at_diagnosis`, `ajcc_pathologic_stage`, and `prior_malignancy` variables.
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glmulti(
+    y = "driver.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$brca$driver$negbi0} %>%
+  best() %>% diagnose(name = "Best Driver Negative Binomial (95 percentile)")
+```
+
+None of the best model variables are actually useful. Let's try and look at the variable importance:
+
+```{r}
+plot(models$brca$driver$negbi0, type = "s")
+```
+
+None of the variables end up being important. Let's try to make a model with just the intercept:
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm.nb(passenger.freq ~ 1, data = .) %>%
+  {. ->> models$brca$driver$importance0} %>%
+  diagnose(name = "Importance Driver Negative Binomial (95 percentile)")
+```
+
+At least the intercept is important. Let's try to remake the analysis but removing the intercept.
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glmulti(
+    y = "driver.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy"),
+    intercept = FALSE,
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$brca$driver$negbi1} %>%
+  best() %>% diagnose(name = "Best Driver Negative Binomial (95 percentile) No intercept")
+```
+
+```{r}
+plot(models$brca$driver$negbi1, type = "s")
+```
+
+The model gets even worse... Very weird!
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis + ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$brca$driver$qps0} %>%
+  diagnose(name = "Driver Model Quasi Poisson 0")
+
+# The worst variable is stage (I think)
+
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis + prior_malignancy,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$brca$driver$qps1} %>%
+  diagnose(name = "Driver Model Quasi Poisson 1")
+
+# remove prior_malignancy
+
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$brca$driver$qps2} %>%
+  diagnose(name = "Driver Model Quasi Poisson 2")
+
+# Remove the intercept
+
+projects$`TCGA-BRCA`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.95)) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis - 1,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$brca$driver$qps3} %>%
+  diagnose(name = "Driver Model Quasi Poisson 3")
+
+```
+
+I don't think I need to say that the models are quite bad.
+
+## TCGA-LUAD
+
+Let's look again at the distribution of points to see if we catch obviously different populations of dots.
+
+```{r}
+plotjitter(projects$`TCGA-LUAD`$cleanclinical)
+```
+
+I think we can keep the whole distribution, except for that very far point. I'll just filter it out at < 5000 passenger mutations.
+
+Let's see which variables we can use:
+
+```{r}
+projects$`TCGA-LUAD`$cleanclinical %>% colnames()
+```
+
+I'll use the `age_at_diagnosis`, `ajcc_pathologic_stage` and `driver.freq` variables.
+
+### Passenger Models
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-LUAD`$cleanclinical %>%
+  filter(passenger.freq < 5000) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$luad$pass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial")
+```
+
+The model looks decent overall.
+
+```{r}
+plot(models$luad$pass$negbi0, type = "s")
+```
+
+The best model is already made in the previous box, so I won't make it again here.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-LUAD`$cleanclinical %>%
+  filter(passenger.freq < 5000) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + ajcc_pathologic_stage + driver.freq,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$luad$pass$qps0} %>%
+  diagnose(name = "Passenger Quasi Poisson 0")
+
+# The stage is bad
+
+projects$`TCGA-LUAD`$cleanclinical %>%
+  filter(passenger.freq < 5000) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + driver.freq,
+    data = .,
+    family = quasipoisson
+    ) %>%
+  {. ->> models$luad$pass$qps1} %>%
+  diagnose(name = "Passenger Quasi Poisson 1")
+```
+
+The residuals are horrible, compared to the negative binomial models.
+
+### Driver Models
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-LUAD`$cleanclinical %>%
+  filter(passenger.freq < 5000) %>%
+  glmulti(
+    y = "driver.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$luad$driver$negbi0} %>%
+  best() %>% diagnose(name = "Best Driver Negative Binomial")
+
+```
+
+```{r}
+plot(models$luad$driver$negbi0, type = "s")
+```
+
+None of the predictors are useful. Let's see the intercept-only model:
+
+```{r}
+projects$`TCGA-LUAD`$cleanclinical %>%
+  filter(passenger.freq < 5000) %>%
+  glm.nb(driver.freq ~ 1, data = .) %>%
+  {. ->> models$luad$driver$importancenegbi} %>%
+  diagnose(name = "Best Driver Negative Binomial Importance")
+```
+
+The driver models are again pretty bad.
+
+## TCGA-SKCM
+
+Let's look again at the distribution.
+
+```{r}
+plotjitter(projects$`TCGA-SKCM`$cleanclinical)
+```
+
+There seems to be one outlier in the driver direction and two outliers in the passenger direction. I'll crop them out.
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  plotjitter()
+```
+
+Much better. Now, for the variables:
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>% colnames()
+```
+
+I will use the `age_at_diagnosis`, `ajcc_stage`, `prior_malignancy` and `driver.freq` to model the data, like for the other tumors.
+
+### Passenger Models
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "driver.freq", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$skcm$pass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial")
+```
+
+The residuals look slightly skewed for at high and low values, but it's not that pronounced. Let's see if the most important variables do not include `prior_malignancy`:
+
+```{r}
+plot(models$skcm$pass$negbi0, type = "s")
+```
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm.nb(passenger.freq ~ driver.freq, data = .) %>%
+  {. ->> models$skcm$pass$importancenegbi} %>%
+  diagnose(name = "Importance Passenger NegBi")
+```
+
+The only bad things with this model are the skewed high and low residuals.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + ajcc_pathologic_stage + driver.freq + prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps0} %>%
+  diagnose("Passenger Quasi Poisson 0")
+
+# age is bad
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ ajcc_pathologic_stage + driver.freq + prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps1} %>%
+  diagnose("Passenger Quasi Poisson 1")
+
+# Prior Malignancy is bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ ajcc_pathologic_stage + driver.freq,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps2} %>%
+  diagnose("Passenger Quasi Poisson 2")
+
+# Stage is slightly bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ driver.freq,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps3} %>%
+  diagnose("Passenger Quasi Poisson 3")
+
+```
+
+The model is terrible: overdispersed and the residuals are horrible. The negative binomial is just better.
+
+### Driver Models
+
+#### Negative Binomial
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glmulti(
+    y = "driver.freq",
+    xr = c("age_at_diagnosis", "ajcc_pathologic_stage", "prior_malignancy"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$skcm$driver$negbi0} %>%
+  best() %>% diagnose(name = "Best Driver Negative Binomial")
+```
+
+Just the intercept again...
+
+```{r}
+plot(models$skcm$driver$negbi0, type = "s")
+```
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm.nb(driver.freq ~ 1, data = .) %>%
+  {. ->> models$skcm$driver$importancenegbi} %>%
+  diagnose(name = "Driver Importance NegBi")
+```
+
+Same considerations as above.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis + ajcc_pathologic_stage + prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$driver$qps0} %>%
+  diagnose("Driver Quasi Poisson 0")
+
+# Stage is bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ age_at_diagnosis + prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps1} %>%
+  diagnose("Passenger Quasi Poisson 1")
+
+# Age is bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps2} %>%
+  diagnose("Passenger Quasi Poisson 2")
+
+# Prior malignancy is slightly bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  glm(
+    passenger.freq ~ 1,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$skcm$pass$qps3} %>%
+  diagnose("Passenger Quasi Poisson 3")
+```
+
+See above. Terrible models.
+
+## TCGA-GBM
+
+There are no variables for this tumor type, but I guess I'll do it with something? At least just the passenger ~ driver models.
+
+```{r}
+projects$`TCGA-GBM`$cleanclinical %>% plotjitter()
+```
+
+Many outliers in the high passengers. For the drivers, I see just two. Let's crop it hard since we have just a few variables, at the 90th percentile.
+
+```{r}
+projects$`TCGA-GBM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  plotjitter()
+```
+
+There are also a few low-passenger patients that seem outliers. I'll not crop them for now. Let's see the variables that we can use:
+
+```{r}
+projects$`TCGA-GBM`$cleanclinical %>% colnames()
+```
+
+We can use only `age_at_diagnosis` and `driver.freq`.
+
+### Passenger Models
+
+#### Negative Binomial
+```{r}
+# Using glmulti is overkill, but I did it for every other tumor, so.
+projects$`TCGA-GBM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$gbm$pass$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial")
+```
+
+Surprisingly the model is not that bad. There are just those low points that we already saw in the distribution that seem to be outliers. I'll try and crop them out too.
+
+```{r}
+# Using glmulti is overkill, but I did it for every other tumor, so.
+projects$`TCGA-GBM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  filter(passenger.freq > 20) %>%
+  glmulti(
+    y = "passenger.freq",
+    xr = c("age_at_diagnosis", "driver.freq"),
+    data = .,
+    level = 1,
+    fitfunction = MASS::glm.nb,
+    plotty = FALSE, report = FALSE,
+    method = "h"
+    ) %>%
+  {. ->> models$gbm$passnolow$negbi0} %>%
+  best() %>% diagnose(name = "Best Passenger Negative Binomial - Cropped Low")
+```
+
+The low residuals are all gone, as expected.
+
+Let's look at both models importance:
+
+```{r}
+models$gbm$pass$negbi0 %>% plot(type = "s")
+models$gbm$passnolow$negbi0 %>% plot(type = "s")
+```
+
+The most important variables are already present in the above models, so there is no need to make them manually.
+
+#### Quasi Poisson
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis + prior_malignancy,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$gbm$pass$qps0} %>%
+  diagnose("Passenger Quasi Poisson 0")
+
+# Prior malignancy is bad
+
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  glm(
+    driver.freq ~ age_at_diagnosis,
+    data = .,
+    family = quasipoisson
+  ) %>%
+  {. ->> models$gbm$pass$qps1} %>%
+  diagnose("Passenger Quasi Poisson 1")
+```
+
+The zero drivers and the very high drivers are still outside the distribution. I'm not super sure what to do about them. However, the model is overall not terrible, I guess.
+
+### Driver Models
+
+For these models I just have the age. So there is no need to use `glmulti`.
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  glm.nb(driver.freq ~ age_at_diagnosis, data = .) %>%
+  {. ->> models$gbm$driver$negbi0} %>%
+  diagnose("Driver Negative Binomial")
+```
+
+For the Quasipoisson model:
+
+```{r}
+projects$`TCGA-SKCM`$cleanclinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  glm(driver.freq ~ age_at_diagnosis, data = ., family = quasipoisson) %>%
+  {. ->> models$gbm$driver$qps0} %>%
+  diagnose("Driver Negative Binomial")
+```
+
+Again, the zeroes and high points, just like the negative binomial distributions.
+
+
+# Clustering
+
+I'll try to run some clustering measures on the various levels, in order to see if some of the variables can cluster the data somehow. I transform the passenger frequencies to their log10 counterparts, to reduce their power in the statistic (although it'll still be significant).
+
+I show all variables whose DB clustering index is less than a arbitrary threshold of 10.
+
+```{r}
+get.distances <- function(data, possible.levels){
+  # I remove the useless cols so I don't have to do it manually every time
+  possible.levels <- possible.levels[!colnames(possible.levels) %in% c("age_at_diagnosis","ID", "driver.freq", "passenger.freq")]
+  # The DB function requires numeric indicators of the various clusters
+  # this converts from factors to just numbers representing the different labels
+  possible.levels %>% lapply(as.factor) %>% lapply(as.numeric) %>%
+    as.data.frame() -> possible.levels
+
+  # I select only factors that split the population in a significant way (more
+  # than 10% of the population or 25, whichever is bigger). This is done in
+  # order to avoid "clusters" of only 1 or 2 points.
+  # This is mostly done for gene labels, as it's probably useless for the clinical
+  # data.
+  possible.levels <- possible.levels[colSums(possible.levels - 1) > max(length(possible.levels[1]) / 10, 25)]
+  possible.levels.name <- colnames(possible.levels)
+  if (length(possible.levels.name) == 0) {
+    return(NULL)
+  }
+
+  distances <- list()
+
+  for (name in possible.levels.name) {
+    distances[[name]] <- index.DB(data, possible.levels[[name]])$DB
+  }
+  vector.dist <- reduce(distances, c)
+  names(vector.dist) <- names(distances)
+  return(vector.dist)
+}
+
+plot_distance <- function(labels, variable, name, DB_value){
+  # I set the seed here so the different plots can be compared as they
+  # will have the same jitter displacement
+  set.seed(72)
+
+  ylimits <- c(-0.5, max(labels$driver.freq + 0.5))
+
+  p <- ggplot(labels, aes(passenger.freq, driver.freq)) +
+    geom_jitter(alpha=0.7, height=0.2, aes(colour = as.factor(.data[[variable]]))) +
+    #scale_color_manual(values = c("0" = "palegreen3", "1" = "deeppink3"), labels = c("No", "Yes")) +
+    scale_x_log10() +
+    ylim(ylimits) +
+    ggtitle(paste("Clustering by mutation", variable, name, paste("DB:", DB_value), sep = " - ")) +
+    xlab("Passenger Frequency") + ylab("Driver Frequency") +
+    annotation_logticks(sides = "b") +
+    labs(color = "Legend") +
+    theme_bw() + theme(panel.grid.minor = element_blank(), legend.position = "left")
+
+  # Need a new frame with just the driver levels, and the associated non-coloured and coloured sums.
+  labels %>% dplyr::select(!c(passenger.freq, ID)) %>% melt(id.vars = c("driver.freq")) -> bdata
+  var <- variable
+  bdata %>% group_by(driver.freq, value) %>% subset(variable == var) %>% summarise(count = n()) -> box.data
+
+  factor.levels <- levels(as.factor(labels[[variable]]))
+  to.plot <- factor(box.data$value, levels = factor.levels)
+
+  y.box <- ggplot(box.data, aes(fill = to.plot, x = driver.freq, y = count)) +
+    geom_bar(position = "fill", stat = "identity", width = 0.8) +
+    scale_y_continuous(breaks = c(0, 0.5, 1), labels = c("0", "0.5", "1")) +
+    theme_minimal() +
+    theme(legend.position = "none", axis.title.y = element_blank(), axis.text.y = element_blank()) +
+    xlab(element_blank()) + ylab(element_blank()) +
+    coord_flip()
+
+  plot_grid(p, y.box, nrow = 1, align = "h", rel_widths = c(1, 0.2))
+}
+
+make_cluster_plots <- function(project, name="", max_plots = 5, db.threshold = 10) {
+  clinical.dists <- get.distances(
+    project$cleanclinical[, c("driver.freq", "passenger.freq")],
+    project$cleanclinical
+  )
+  genelabs.distances <- get.distances(
+    project$gene_labels[, c("driver.freq", "passenger.freq")],
+    project$gene_labels
+  )
+  # I set an arbitrary threshold of 10 to show
+  clinical.dists <- clinical.dists[clinical.dists < db.threshold]
+  genelabs.distances <- genelabs.distances[genelabs.distances < db.threshold]
+
+  if (is.null(c(clinical.dists, genelabs.distances))) {
+    stop(paste("No viable distances (< 10) to plot for", name))
+  }
+
+  if (!is.null(clinical.dists)) {
+    clinical.dists <- sort(clinical.dists, decreasing = FALSE)
+    names(clinical.dists) %>% head(max_plots) -> to_plot
+    for (level in to_plot) {
+      print(plot_distance(project$cleanclinical, level, name, signif(clinical.dists[level], 3)))
+    }
+  }
+
+  if (!is.null(genelabs.distances)) {
+    genelabs.distances <- sort(genelabs.distances, decreasing = FALSE)
+    names(genelabs.distances) %>% head(max_plots) -> to_plot
+    for (level in to_plot) {
+      print(plot_distance(project$gene_labels, level, name, signif(genelabs.distances[level], 3)))
+    }
+  }
+}
+
+
+for (name in p.names) {
+  #make_cluster_plots(projects[[name]], name, 2)
+  tryCatch(make_cluster_plots(projects[[name]], name, 3, 15), error = function(e) {print(e)})
+}
+```
