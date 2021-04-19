@@ -24,7 +24,7 @@ def stitch_lymp(file_in, reference, file_out=None):
     file in : str
         Full path to crystal file containing patient mutations.
     reference : str
-        Full path to file containing lympocyte infiltrate information.
+        Full path to file containing lymphocyte infiltrate information.
     file_out : str, optional
         Full path to output file. If unspecified, does not write a file.
 
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "-o",
         "--out",
-        help=("Specify target output file." "Defaults to writing no file."),
+        help="Specify target output file. Defaults to writing no file.",
         nargs="?",
         default=None,
     )

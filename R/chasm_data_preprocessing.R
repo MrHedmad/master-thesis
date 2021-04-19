@@ -193,7 +193,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "M1a" = "M1",
           "M1b" = "M1",
           "M1c" = "M1",
-          "MX" = "MX", # TODO: Is this an NA?
+          "MX" = NA, # TODO: Is this an NA?
           "cM0 (i+)" = "M0",
           "Unknown" = NA,
           "Not Reported" = NA),
@@ -225,7 +225,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "N3b" = "N2+",
           "N3c" = "N2+",
           "N4" = "N2+",
-          "NX" = "NX", # TODO: Is this an NA?
+          "NX" = NA, # TODO: Is this an NA?
           "Unknown" = NA,
           "Not Reported" = NA),
         warn_missing = FALSE
@@ -266,7 +266,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "Stage IVC" = "Stage1",
           # 'Tis' are small mutated cells - some do not consider this as cancer
           "Stage Tis" = "Stage0",
-          "Stage X" = "Stage X", # Is this an NA?
+          "Stage X" = NA, # Is this an NA?
           "Unknown" = NA,
           "Not Reported" = NA),
         warn_missing = FALSE
@@ -302,7 +302,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "T4c" = "T3+",
           "T4d" = "T3+",
           "T4e" = "T3+",
-          "TX" = "TX",
+          "TX" = NA,
           "Ta" = "T1",
           "Tis" = "T0",
           "Tis (DCIS)" = "T0",
@@ -322,7 +322,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "M1c" = "M1",
           "M1d" = "M1",
           "M2" = "M2",
-          "MX" = "MX", # TODO: Is this an NA?
+          "MX" = NA, # TODO: Is this an NA?
           "cM0 (i+)" = "M0",
           "Unknown" = NA,
           "Not Reported" = NA),
@@ -354,7 +354,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "N3b" = "N2+",
           "N3c" = "N2+",
           "N4" = "N2+",
-          "NX" = "NX", # TODO: Is this an NA?
+          "NX" = NA, # TODO: Is this an NA?
           "Unknown" = NA,
           "Not Reported" = NA),
         warn_missing = FALSE
@@ -396,7 +396,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "Stage IVC" = "Stage1",
           # 'Tis' are small mutated cells - some do not consider this as cancer
           "Stage Tis" = "Stage0",
-          "Stage X" = "Stage X",
+          "Stage X" = NA,
           "Unknown" = NA,
           "Not Reported" = NA),
         warn_missing = FALSE
@@ -432,7 +432,7 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "T4c" = "T3+",
           "T4d" = "T3+",
           "T4e" = "T3+",
-          "TX" = "TX",  # TODO: Is this an NA?
+          "TX" = NA,  # TODO: Is this an NA?
           "Ta" = "T1",
           "Tis" = "T0",
           "Tis (DCIS)" = "T0",
@@ -615,6 +615,46 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
           "C77.9" = "metastasis" # Secondary neoplasm in lymph nodes - unspecified
         ),
         warn_missing = FALSE
+      )
+    }
+    if (colname == "icd_10_code" & tumor.type == "TCGA-BRCA") {
+      clinical.data[[colname]] <- revalue(clinical.data[[colname]], c(
+        # Breast
+        "C50.2" = "breast", # Upper inner quadrant
+        "C50.3" = "breast", # Lower inner quadrant
+        "C50.4" = "breast", # Upper outer quadrant
+        "C50.5" = "breast", # Lower outer quadrant
+        "C50.8" = "breast", # Overlapping sites
+        "C50.9" = "breast", # Unspecified
+        "C50.919" = "breast" # Unspecified, Female
+      ),
+      warn_missing = FALSE
+      )
+    }
+    if (colname == "icd_10_code" & tumor.type == "TCGA-LUAD") {
+      clinical.data[[colname]] <- revalue(clinical.data[[colname]], c(
+        # Lung
+        "C34.0" = "mainbronchus", # Main bronchus
+        "C34.1" = "lobe", # Upper lobe, bronchus or lung
+        "C34.2" = "lobe", # Middle lobe, bronchus or lung
+        "C34.3" = "lobe", # Lower lobe, bronchus or lung
+        "C34.30" = "lobe", # Lower lobe, unspecified
+        "C34.8" = "diffuse", # Overlapping sites
+        "C34.9"  = "generic" # Unspecified
+      ),
+      warn_missing = FALSE
+      )
+    }
+    if (colname == "icd_10_code" & tumor.type == "TCGA-GBM") {
+      clinical.data[[colname]] <- revalue(clinical.data[[colname]], c(
+        # Colon
+        "C71.1" = "cerebrum", # Cerebrum, except lobes and ventricles
+        "C71.2" = "temporal", # Temporal Lobe
+        "C71.4" = "occipital", # Occipital Lobe
+        "C71.8" = "overlapping", # Overlapping sites
+        "C71.9" = "generic" # Unspecified
+      ),
+      warn_missing = FALSE
       )
     }
     # primary and secondary gleason grade are weird...

@@ -1734,6 +1734,6 @@ make_cluster_plots2 <- function(project, name="", max_plots = 5, crop_dist = 90)
 
 
 for (name in p.names) {
-  tryCatch(make_cluster_plots2(model.data[[name]], name, 2), error = function(e) {print(e)})
+  tryCatch(make_cluster_plots2(projects[[name]], name, 2), error = function(e) {print(e)})
 }
 ```
