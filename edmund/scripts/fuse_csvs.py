@@ -12,7 +12,6 @@ from typing import Union
 import click
 import pandas as pd
 
-from edmund.config import CONFIG
 from edmund.entrypoint import cli
 from edmund.utils import cqdm
 
@@ -28,7 +27,7 @@ def fuse_csvs(
     """Fuse .csv files in target folder(s) into a single pandas object
 
     Adds an additional column with the name of the file from where the entry
-    was taken from.
+    was taken from. The column name for this is `Identifier`
 
     It assumes that the header is the first line of each file.
 
@@ -85,7 +84,7 @@ def fuse_csvs(
 
     for file_path in cqdm(file_paths, desc="Reading found files"):
         frame = pd.read_csv(file_path)
-        frame["Identifier"] = file_path.name
+        frame["Identifier"] = file_path.stem
         objects.append(frame)
 
     return pd.concat(
