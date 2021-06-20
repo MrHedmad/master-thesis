@@ -1,0 +1,838 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Preamble
+
+As per usual, we begin by loading some libraries.
+
+```{r global options, include = FALSE}
+# Do not include warnings in the output PDF
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+```{r, echo=TRUE, results='hide'}
+library(plyr) # Data shape casting (needs to be loaded before dplyr)
+library(tidyverse)
+# Tidyverse loads ggplot2, purrr, tibble, dplyr, tidyr, stringr, readr and forcats
+# This suppresses the warning that summarise makes about grouping.
+options(dplyr.summarise.inform = FALSE)
+library(reshape2) # Data melt and cast
+library(cowplot) # Margin plots made (a bit) easier
+library(gridExtra) # Stuff like grid.arrange
+library(ComplexHeatmap)
+
+# The docstring package is entirely optional but it allows me to print out help messages
+# as I write more code, so it's nice as I often forget what my own functions do...
+library(docstring)
+```
+
+Other packages that need to be installed (I call them sporadically without bringing them into scope):
+```{r}
+test_installed <- function (package) {
+  if(!package %in% installed.packages()) {
+    stop("Package '", package, "' is not installed.")
+  }
+}
+test_installed("ggrepel") # Add labels over scatterplots
+test_installed("jtools") # Provides easy effect plots
+```
+
+
+# Loading data
+
+Data preprocessing has already occurred. Please take a look at the `chasm_data_preprocessing.R` script in the GitHub. I only load the smaller dataset, with just the five tumor types of interest.
+
+```{r}
+load("F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data_2.Rdata")
+p.names <- names(projects)
+
+# I save the tumor type in the clinical data as an attribute, as basically every function
+# that takes the clinical data also needs it (like, for plotting)
+# This way, I don't need to pass it manually every time, but just extract it from the data
+# itself.
+for (name in p.names) {
+  attr(projects[[name]]$clinical, "project.id") <- name
+}
+```
+
+# Analysis
+
+Basic statistics (`summary` is a bit messy as it considers all variables). In order to reduce noise in the models, levels that show very little patients could be removed in order to reduce the number of variables in the model. First, however, the levels must be shown. I select some variables of interest that are useful to print out.
+
+```{r}
+# Sometimes, there are no males, so the function would error, so we need a
+# "safe" extract
+extract_safe <- function(t, what, default = 0) {
+  #' Safely extract variables
+  #'
+  #' Extract from a dataframe T a variable WHAT. If it's missing, return
+  #' DEFAULT instead
+  tryCatch(t[[what]], error = function(e) default)
+}
+
+get.name <- function(clinical) {
+  #' Helper function to get the name of a clinical dataframe
+  return(attr(clinical, "project.id"))
+}
+
+
+sum_clin <- function(clinical.data){
+  # Get a custom summary for the clinical data
+  #
+  # Get some statistics about clinical data. Includes overall numerosity,
+  # driver numerosity, means and standard deviations for passenger/driver
+  # distributions, and more.
+  name <- get.name(clinical.data)
+  data <- clinical.data
+  totn <- length(data$ID)
+  n0mut <- length(data$ID[data$driver.freq == 0])
+  perc0mut <- n0mut/totn*100
+  sex <- table(data$gender)/totn*100
+
+  frame <- data.frame(
+    # tumor metadata
+    ID = name,
+    # Numerosities
+    numerosity = totn,
+    numerosity.0.drivers = n0mut,
+    percent.0.drivers = n0mut/totn*100,
+    # Driver distributions
+    mean.driver.nr = mean(data$driver.freq),
+    median.driver.nr = median(data$driver.freq),
+    sd.driver.nr = sd(data$driver.freq),
+    driver.var.coff = sd(data$driver.freq) / mean(data$driver.freq),
+    iqr.driver.nr = IQR(data$driver.freq),
+    # Passenger distributions
+    mean.passenger.nr = mean(data$passenger.freq),
+    median.passenger.nr = median(data$passenger.freq),
+    sd.passenger.nr = sd(data$passenger.freq),
+    passenger.var.coff = sd(data$passenger.freq) / mean(data$passenger.freq),
+    iqr.passenger.nr = IQR(data$passenger.freq),
+    # Sex
+    percent.reported.male = signif(extract_safe(sex, "male"), digits=4),
+    # Age
+    mean.age.years = mean((data$age_at_diagnosis)/365.25, na.rm = TRUE),
+    sd.age.years = sd((data$age_at_diagnosis)/365.25, na.rm = TRUE),
+    var.cof.age = sd((data$age_at_diagnosis)/365.25, na.rm = TRUE) / mean((data$age_at_diagnosis)/365.25, na.rm = TRUE)
+  )
+
+  return(frame)
+}
+
+get.name <- function(clinical) {
+  #' Helper function to get the name of a clinical dataframe
+  return(attr(clinical, "project.id"))
+}
+
+print_clinical_summary <- function(clin.stats){
+  # Pretty print the clinical data summary
+  #
+  # Takes the clinical data, and well, prints it but better.
+  l <- function(x){return(signif(x, digits = 4))}
+  cat(paste(
+    "Statistics for clinical data - ", clin.stats$ID, "\n", "\n",
+    "Numerosities:\n",
+    "\tNumber of patients :          ", clin.stats$numerosity, "\n",
+    "\tNr. of pat. with no drivers : ", clin.stats$numerosity.0.drivers, "\n",
+    "\t% of pat. with no drivers :   ", l(clin.stats$percent.0.drivers), " %\n",
+    "Driver Distribution:\n",
+    "\tMean Driver frequency :       ", l(clin.stats$mean.driver.nr), "\n",
+    "\tMedian Driver frequency :      ", l(clin.stats$median.driver.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.driver.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$driver.var.coff), "\n",
+    "\tInterquartile Range:           ", l(clin.stats$iqr.driver.nr), "\n",
+    "Passenger Distribution:\n",
+    "\tMean passenger frequency :    ", l(clin.stats$mean.passenger.nr), "\n",
+    "\tStandard Deviation of Mean :  ", l(clin.stats$sd.passenger.nr), "\n",
+    "\tVariation Coefficient:        ", l(clin.stats$passenger.var.coff), "\n",
+    "\tMedian passenger frequency:   ", l(clin.stats$median.passenger.nr), "\n",
+    "\tInterquartile Range:           ", l(clin.stats$iqr.passenger.nr), "\n",
+    "\n",
+    "% reported male:  ", clin.stats$percent.reported.male, " %\n",
+    "Mean Age (years): ", l(clin.stats$mean.age.years), "\n",
+    "SD age (years):   ", l(clin.stats$sd.age.years), "\n",
+    "Var Cof Age:      ", l(clin.stats$var.cof.age),
+    sep=""
+  ))
+}
+
+descriptive.stats <- list()
+
+for (name in p.names) {
+  # I keep only patients that are in the cleanclinical frame after the filtering
+  # So that the summaries actually show the patients that will be used in the
+  # models. This wasn't obvious before.
+  projects[[name]]$clinical %>%
+    sum_clin() ->
+    descriptive.stats[[name]]
+}
+
+for (name in p.names) {
+  descriptive.stats[[name]] %>% print_clinical_summary()
+  clinical.data <- projects[[name]]$clinical
+  for (colname in colnames(clinical.data)) {
+    if (is.factor(clinical.data[[colname]]) & colname != "ID") {
+      table(clinical.data[[colname]]) %>%
+        print() %>% capture.output() %>% paste(collapse="\n") ->
+        output.str
+      cat(paste("\n\nFactor", colname, "levels:", output.str))
+    }
+  }
+
+  # Just some visual separator
+  cat("\n\n--------------------------------\n\n")
+}
+```
+
+I tabulate the clinical variables calculated above so that we can show it in a table
+
+```{r}
+bind_rows(descriptive.stats) %>%
+  # Just to make the colnames more readable
+  rename(c(
+      `Tumor ID` = "ID",
+      `Patient nr.` = "numerosity",
+      `Patient nr. zero drivers` = "numerosity.0.drivers",
+      `Percentage zero driver patients` = "percent.0.drivers",
+      `Mean driver frequency` = "mean.driver.nr",
+      `Median driver frequency` = "median.driver.nr",
+      `SD driver frequency` = "sd.driver.nr",
+      `VarCof driver frequency` = "driver.var.coff",
+      `IQR driver frequency` = "iqr.driver.nr",
+      `Mean passenger frequency` = "mean.passenger.nr",
+      `Median passenger frequency` = "median.passenger.nr",
+      `SD passenger frequency` = "sd.passenger.nr",
+      `VarCof passenger frequency` = "passenger.var.coff",
+      `IQR passenger frequency` = "iqr.passenger.nr",
+      `Percentage Reported Male` = "percent.reported.male",
+      `Mean age (years)` = "mean.age.years",
+      `SD age (years)` = "sd.age.years",
+      `Age Var Cof` = "var.cof.age"
+    )) ->
+  clinical.summary.table
+
+clinical.summary.table
+```
+
+Averge pass vs average drivers
+
+```{r}
+averages <- lapply(projects, function(x) {
+  name <- get.name(x$clinical)
+  return(
+    data.frame(
+      ID = name,
+      avg.drivers = mean(x$clinical$driver.freq),
+      avg.passengers = mean(x$clinical$passenger.freq)
+    )
+  )
+})
+averages %>% reduce(rbind) -> averages
+
+mutburden <- function(averages) {
+  p <- ggplot(averages, aes(x = avg.drivers, y = avg.passengers)) +
+    geom_smooth(method = "lm", formula = "y ~ x", se=FALSE, alpha = 0.5, colour = "lightblue") +
+    geom_point(color = "red", size = 2) +
+    ggrepel::geom_text_repel(aes(label = ID), size = 3, max.overlaps = 15, min.segment.length = 0) +
+    #scale_x_continuous(trans=scales::pseudo_log_trans(base = 10, sigma = 0.1)) +
+    #scale_y_continuous(trans=scales::pseudo_log_trans(base = 10)) +
+    scale_x_log10() +
+    scale_y_log10() +
+    annotation_logticks() +
+    ggtitle("Mutational Burden") +
+    xlab("Average Drivers") + ylab("Average Passengers") +
+    theme_bw()
+
+  return(p)
+}
+
+mutburden(averages)
+
+summary(lm(avg.passengers ~ avg.drivers, data=averages))
+
+```
+
+Jitter plots for each of the tumors
+
+```{r}
+plotjitter <- function(
+    clinical.data,
+    x = "passenger.freq",
+    y = "driver.freq",
+    ylabel = paste("Number of Driver Mutations"),
+    xlabel = paste("Number of Passenger Mutations"),
+    na.rm = TRUE,
+    boxplots.fill.colour = "lightgreen",
+    outlier.alpha = 0.5,
+    title = paste("Driver vs Passenger Mutations"),
+    distribution.breaks = c("red" = 10, "purple" = 25, "blue" = 50, "purple" = 75, "red" = 90)
+  ){
+  #' Make a ggplot plotting one variable against another
+  #'
+  #' Specifically intended for driver vs passenger scatterplots, but it can,
+  #' in theory, used for any two numerical variables.
+  #' It makes a jitterplot with a very small y axis jitter (where drivers
+  #' are usually plotted), and no x jitter, and adds margin boxplots
+  #' that show the overall x and y distributions.
+  #' @param clinical.data The data.frame that holds the clinical data.
+  #' @param x A string with the colname of the variable to plot in the x axis.
+  #' @param y A string with the colname of the variable to plot in the y axis.
+  #' @param ylabel The label for the y axis.
+  #' @param xlabel The label for the x axis.
+  #' @param na.rm Bool. Should the NAs be removed from the dataframe (via
+  #' na.omit) before drawing the plot?
+  #' @param boxplot.fill.color The colour of the inner sides of the boxplots.
+  #' @param outlier.alpha The alpha level (transparency) of the outlier dots
+  #' in the boxplots.
+  #' @param title The title of the plot
+  #' @param distribution.breaks A named vector with percentile numbers as values
+  #' and colours as names. Will draw vertical (y-parallel) lines at the
+  #' corresponding x quantiles with the specified colours. Useful to show the
+  #' distribution of the data differently than the "standard" boxplot.
+  #' Pass `NULL` to disable the vertical lines.
+  if(na.rm){
+    clinical.data %>% na.omit() -> clinical.data
+  }
+  base.plot <- ggplot(clinical.data, aes(y=.data[[y]], x=.data[[x]])) +
+    geom_jitter(height=0.1, alpha = 0.6, na.rm = TRUE) +
+    xlab(xlabel) +
+    ylab(ylabel) +
+    theme_minimal() +
+    scale_x_log10() +
+    ggtitle(title)
+
+  if (!is.null(dist)) {
+    for (i in seq(from = 1, to = length(distribution.breaks))) {
+      base.plot <- base.plot +
+        geom_vline(
+          xintercept = quantile(clinical.data[[x]], distribution.breaks[i]/100),
+          color = names(distribution.breaks[i]), alpha=0.5)
+    }
+  }
+
+  # Re-adding the log10 scale generates a warning, but it's useless. So I suppress it.
+  suppressMessages(
+    x.box <- axis_canvas(base.plot, axis = "x", coord_flip = TRUE) +
+      scale_y_log10() +
+      stat_boxplot(
+        data = clinical.data, aes(y = .data[[x]], x = 1), geom ='errorbar'
+        ) +
+      geom_boxplot(
+        data = clinical.data, aes(y = .data[[x]], x = 1),
+        fill = boxplots.fill.colour,
+        outlier.alpha = outlier.alpha
+        ) +
+      coord_flip()
+  )
+  y.box <- axis_canvas(base.plot, axis = "y") +
+    stat_boxplot(
+      data = clinical.data, aes(y = .data[[y]], x = 1), geom ='errorbar'
+      ) +
+    geom_boxplot(
+      data = clinical.data, aes(y = .data[[y]], x = 1),
+      fill = boxplots.fill.colour, outlier.alpha = outlier.alpha
+      )
+
+  empty <- ggdraw()
+
+  base.plot %>%
+    insert_xaxis_grob(x.box, grid::unit(7, "mm"), position = "top") %>%
+    insert_xaxis_grob(empty, grid::unit(2, "mm"), position = "top") %>%
+    insert_yaxis_grob(y.box, grid::unit(7, "mm"), position = "right") %>%
+    insert_yaxis_grob(empty, grid::unit(2, "mm"), position = "right") ->
+    final.plot
+
+  return(ggdraw(final.plot))
+}
+
+for (name in p.names) {
+  plotjitter(projects[[name]]$clinical, title = paste("Driver vs Passenger Frequencies -", name)) %>% plot()
+}
+
+```
+
+```{r}
+driver.boxplot <- function(clinical.data, colour = "lightblue"){
+  #' Create a driver boxplot graph from project clinical data
+  #'
+  #' The scales of the passenger frequency is logarithmic (base 10), because
+  #' the data has a very long tail towards large numbers.
+  #' @param clinical.data Clinical data from a project
+  #' @param colour The colour that fills the boxplots
+  #'
+  #' Made to work with project-like clinical data with a `project.id` attribute.
+  clinical.data$driver.freq <- as.factor(clinical.data$driver.freq)
+  project.id <- get.name(clinical.data)
+
+  base.plot <- ggplot(
+      clinical.data, aes(group = driver.freq, x = driver.freq, y = passenger.freq)
+    ) +
+    stat_boxplot(geom ='errorbar', width = 0.4) +
+    geom_point(alpha=0) +
+    geom_boxplot(fill = colour) +
+    scale_y_log10() +
+    ylab("Passenger frequency") + xlab("Driver Frequency") +
+    ggtitle(paste("Passenger vs Driver distributions -", project.id)) +
+    theme_bw() + theme(panel.grid.minor = element_blank()) +
+    annotation_logticks(sides = "l")
+
+  clinical.data$driver.freq <- as.numeric(clinical.data$driver.freq)
+  x.box <- axis_canvas(base.plot, axis = "x", coord_flip = TRUE) +
+    stat_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), geom ='errorbar') +
+    geom_boxplot(data = clinical.data, aes(y = driver.freq, x = 1), fill = colour) +
+    coord_flip()
+  # Re-adding the log10 scale generates a warning, but it's useless. So I suppress it.
+  suppressMessages(
+    y.box <- axis_canvas(base.plot, axis = "y") +
+      scale_y_log10() +
+      stat_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), geom ='errorbar') +
+      geom_boxplot(data = clinical.data, aes(y = passenger.freq, x = 1), fill = colour)
+  )
+
+  empty <- ggdraw()
+
+  final.plot <- insert_xaxis_grob(base.plot, x.box, grid::unit(7, "mm"), position = "top")
+  final.plot <- insert_xaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "top")
+
+  final.plot <- insert_yaxis_grob(final.plot, y.box, grid::unit(7, "mm"), position = "right")
+  final.plot <- insert_yaxis_grob(final.plot, empty, grid::unit(2, "mm"), position = "right")
+
+  return(ggdraw(final.plot))
+}
+
+for (name in p.names) {
+  driver.boxplot(projects[[name]]$clinical, colour = "lightgreen") %>% plot()
+}
+
+```
+
+Saving the plots
+
+```{r eval=FALSE, include=FALSE}
+setwd("F:/Data/University/Thesis/Images")
+
+pdf("MutationBurden.pdf", 8, 4.5)
+mutburden(averages)
+dev.off()
+
+for (name in p.names) {
+  pdf(file = paste(name, "_plotjitter.pdf", sep = ""), 8, 4.5)
+  plotjitter(projects[[name]]$clinical, title = paste("Driver vs Passenger Frequencies -", name)) %>% plot()
+  dev.off()
+
+  pdf(file = paste(name, "_driverboxplot.pdf", sep = ""), 8, 4.5)
+  driver.boxplot(projects[[name]]$clinical, colour = "lightgreen") %>% plot()
+  dev.off()
+}
+
+# Smaller, square versions
+for (name in p.names) {
+  pdf(file = paste(name, "_plotjitter_small.pdf", sep = ""), 6, 6)
+  plotjitter(projects[[name]]$clinical, title = paste("Driver vs Passenger Frequencies -", name)) %>% plot()
+  dev.off()
+
+  pdf(file = paste(name, "_driverboxplot_small.pdf", sep = ""), 6, 6)
+  driver.boxplot(projects[[name]]$clinical, colour = "lightgreen") %>% plot()
+  dev.off()
+}
+```
+
+
+```{r}
+# For some reason I can't do it with `reduce`, as it just removes some variables..?
+
+f.c <- plyr::rbind.fill(
+  projects$`TCGA-BRCA`$clinical,
+  projects$`TCGA-COAD`$clinical,
+  projects$`TCGA-SKCM`$clinical,
+  projects$`TCGA-GBM`$clinical,
+  projects$`TCGA-LUAD`$clinical
+)
+
+attr(f.c, "project.id") <- "overall"
+
+overall.summary <- sum_clin(f.c)
+print_clinical_summary(overall.summary)
+```
+
+
+```{r}
+f.c.nobrca <- plyr::rbind.fill(
+  projects$`TCGA-COAD`$clinical,
+  projects$`TCGA-SKCM`$clinical,
+  projects$`TCGA-GBM`$clinical,
+  projects$`TCGA-LUAD`$clinical
+)
+
+sex <- table(f.c.nobrca$gender)/length(f.c.nobrca$ID)*100
+
+percent.reported.male <- signif(extract_safe(sex, "male"), digits=4)
+
+percent.reported.male
+```
+
+
+
+
+# Most frequent driver genes
+
+
+## Pancancer heatmap
+
+```{r}
+# pancancer data
+all.crystals <- rbind(
+  projects$`TCGA-BRCA`$crystal,
+  projects$`TCGA-SKCM`$crystal,
+  projects$`TCGA-LUAD`$crystal,
+  projects$`TCGA-COAD`$crystal,
+  projects$`TCGA-GBM`$crystal
+)
+```
+
+```{r}
+HeatMutPlot2 <- function(data, project.id, use_renamed = FALSE, gene_nr = 10, max_freq = NA, ...){
+  library(ComplexHeatmap)
+  data <- data$crystal
+  # We need to keep only the drivers
+  data <- data[data$is.driver, ]
+  if (use_renamed){
+    top_mut_genes <- sort(table(data$Renamed.HUGO), decreasing = TRUE)
+  }else{
+    top_mut_genes <- sort(table(data$Hugo), decreasing = TRUE)
+  }
+  top_n_mut_genes <- top_mut_genes[1:gene_nr]
+  genes_to_include <- names(top_n_mut_genes)
+  # Filter data to only retain top nr mut lines
+  if (use_renamed){
+    filtered <- subset(data, as.character(data$Renamed.HUGO) %in% genes_to_include)
+  }else{
+    filtered <- subset(data, as.character(data$Hugo) %in% genes_to_include)
+  }
+  # The previous step leaves a lot of unused factor levels. We remove them here
+  filtered[] <- lapply(filtered, function(x) if(is.factor(x)) factor(x) else x)
+  filtered <- group_by(filtered, ID)
+  if (use_renamed){
+    gene_frequencies <- table(filtered$ID, filtered$Renamed.HUGO)
+  }else{
+    gene_frequencies <- table(filtered$ID, filtered$Hugo)
+  }
+  # No idea but as.matrix doesn't work, so I need to do this badness
+  table_rownames <- rownames(gene_frequencies)
+  table_colnames <- colnames(gene_frequencies)
+  gene_frequencies <- matrix(gene_frequencies, ncol = length(table_colnames), nrow = length(table_rownames))
+  #rownames(gene_frequencies) <- table_rownames
+  colnames(gene_frequencies) <- table_colnames
+
+  gene_frequencies <- gene_frequencies / length(data$ID) * 100
+
+  if (is.na(max_freq)) {
+    max_freq <- max(gene_frequencies)
+  }
+
+  colours <- circlize::colorRamp2(breaks = c(0, 0.0001, max_freq), colors = c("gray", "white", "red"))
+
+  print(Heatmap(
+    gene_frequencies,
+    col = colours,
+    row_title = "Patients",
+    column_title = paste("Top", gene_nr, "most frequent drivers -", project.id),
+    name = "Freq (%)",
+    show_column_dend = FALSE,
+    row_dend_width = unit(3, "cm"),
+    column_names_rot = 45,
+    clustering_method_rows = "ward.D2",
+    clustering_method_columns = "ward.D2",
+    ...
+  ))
+}
+
+HeatMutPlot2(projects$`TCGA-BRCA`, "BRCA")
+HeatMutPlot2(projects$`TCGA-SKCM`, "SKCM")
+HeatMutPlot2(projects$`TCGA-LUAD`, "LUAD")
+HeatMutPlot2(projects$`TCGA-COAD`, "COAD")
+HeatMutPlot2(projects$`TCGA-GBM`, "GBM")
+
+HeatMutPlot2(list(crystal=all.crystals), "Pancancer", gene_nr = 25)
+```
+
+```{r, fig.width=4, fig.height=15}
+
+get.all.drivers <- function(projects) {
+  genes <- map(projects, function(x) {x$crystal$Hugo[x$crystal$is.driver]})
+  all.genes <- reduce(genes, c)
+  return(all.genes)
+}
+
+get.passengers <- function(project) {
+  genes <- project$crystal$Hugo[!project$crystal$is.driver]
+  return(genes)
+}
+
+pancancerHeatmut <- function(projects, genes.shown = 50, max_freq = NA, ...) {
+  #' Make a pancancer heatmap, with tumors as rows and genes as columns
+
+  all.drivers <- get.all.drivers(projects)
+  top.genes <- sort(table(all.drivers), decreasing = TRUE)
+  to_print <- names(top.genes[1:genes.shown])
+
+  frequency_tables <- map(projects, function(x) {
+    freq.table <- sort(table(x$crystal$Hugo), decreasing = TRUE)
+    freq.table <- freq.table[names(freq.table) %in% to_print]
+    freq.table <- freq.table / length(x$crystal$ID) * 100
+    genes <- names(freq.table)
+    freq.df <- as.data.frame(freq.table)
+    freq.df <- as.data.frame(t(freq.df$Freq))
+    names(freq.df) <- genes
+
+    return(freq.df)
+  })
+
+  frq.table <- bind_rows(frequency_tables, .id = 'tumor.type')
+  rnames <- frq.table$tumor.type
+  frq.table$tumor.type <- NULL
+  frq.table <- as.matrix(frq.table)
+  frq.table[is.na(frq.table)] <- 0
+  rownames(frq.table) <- rnames
+
+
+  if (is.na(max_freq)) {
+    max_freq <- max(frq.table, na.rm = TRUE)
+  }
+
+  colours <- circlize::colorRamp2(breaks = c(0, 0.0000000001, max_freq), colors = c("purple", "white", "red"))
+
+  print(Heatmap(
+    t(frq.table),
+    col = colours,
+    row_title = 'Cancer Type',
+    column_title = paste("Top", genes.shown, "pancancer driver genes"),
+    row_names_side = 'left',
+    show_column_dend = FALSE,
+    na_col = 'gray',
+    row_names_gp = gpar(fontsize = 5),
+    show_row_names = TRUE,
+    name = "Freq (%)",
+    ...
+  ))
+}
+
+
+pancancerHeatmut(projects, 150)
+pancancerHeatmut(projects, 50)
+
+```
+
+Saving the above plots
+
+```{r}
+setwd("F:/Data/University/Thesis/Images")
+
+pdf(file = 'BRCA_Heatmap_top25.pdf', 6, 3)
+HeatMutPlot2(projects$`TCGA-BRCA`, "BRCA", gene_nr = 25, column_names_gp = gpar(fontsize = 8))
+dev.off()
+pdf(file = 'SKCM_Heatmap_top25.pdf', 6, 3)
+HeatMutPlot2(projects$`TCGA-SKCM`, "SKCM", gene_nr = 25, column_names_gp = gpar(fontsize = 8))
+dev.off()
+pdf(file = 'LUAD_Heatmap_top25.pdf', 6, 3)
+HeatMutPlot2(projects$`TCGA-LUAD`, "LUAD", gene_nr = 25, column_names_gp = gpar(fontsize = 8))
+dev.off()
+pdf(file = 'COAD_Heatmap_top25.pdf', 6, 3)
+HeatMutPlot2(projects$`TCGA-COAD`, "COAD", gene_nr = 25, column_names_gp = gpar(fontsize = 8))
+dev.off()
+pdf(file = 'GBM_Heatmap_top25.pdf', 6, 3)
+HeatMutPlot2(projects$`TCGA-GBM`, "GBM", gene_nr = 25, column_names_gp = gpar(fontsize = 8))
+dev.off()
+
+pdf(file = 'pancancer_Heatmap_top100.pdf', 6, 3)
+pancancerHeatmut(projects, 100, row_names_gp = gpar(fontsize = 8))
+dev.off()
+pdf(file = 'pancancer_Heatmap_top50.pdf', 6, 3)
+pancancerHeatmut(projects, 50, row_names_gp = gpar(fontsize = 8))
+dev.off()
+```
+
+# Top 25 most mutated genes, pancancer
+
+```{r}
+all.genes <- get.all.drivers(projects)
+print(sort(table(all.genes), decreasing = TRUE)[1:25])
+```
+
+
+
+```{r}
+library(UpSetR)
+setwd("F:/Data/University/Thesis/Images")
+
+get.unique.drivers <- function(project) {
+  return(unique(project$crystal$Hugo[project$crystal$is.driver]))
+}
+
+upsetlist <- list(
+  "BRCA" = get.unique.drivers(projects$`TCGA-BRCA`),
+  "COAD" = get.unique.drivers(projects$`TCGA-COAD`),
+  "LUAD" = get.unique.drivers(projects$`TCGA-LUAD`),
+  "SKCM" = get.unique.drivers(projects$`TCGA-SKCM`),
+  "GBM" = get.unique.drivers(projects$`TCGA-GBM`)
+)
+
+
+pdf("upset_drivers.pdf", 10, 6, onefile = FALSE)
+upset(
+  fromList(upsetlist),
+  order.by = "degree",
+  text.scale = c(2, 1.5, 1.5, 1.5, 1.5, 1.5),
+  #mb.ratio = c(0.55, 0.45),
+  mainbar.y.label = "Intersection Size",
+  sets.x.label = "Nr. of Driver Genes",
+  set_size.scale_max = 100,
+  set_size.show = TRUE,
+  point.size = 3.5, line.size = 1.5
+)
+dev.off()
+
+upsetlistall <- list(
+  "BRCA" = unique(projects$`TCGA-BRCA`$crystal$Hugo),
+  "COAD" = unique(projects$`TCGA-COAD`$crystal$Hugo),
+  "LUAD" = unique(projects$`TCGA-LUAD`$crystal$Hugo),
+  "SKCM" = unique(projects$`TCGA-SKCM`$crystal$Hugo),
+  "GBM" = unique(projects$`TCGA-GBM`$crystal$Hugo)
+)
+
+pdf("upset_all.pdf", 10, 6, onefile = FALSE)
+upset(
+  fromList(upsetlistall), order.by = "degree",
+  text.scale = c(2, 1.5, 1.5, 1, 1.5, 1.5),
+  #mb.ratio = c(0.55, 0.45),
+  mainbar.y.label = "Intersection Size",
+  sets.x.label = "Nr. of Passenger Genes",
+  set_size.scale_max = 25000,
+  set_size.show = TRUE,
+  point.size = 3.5, line.size = 1.5
+)
+dev.off()
+```
+
+Unique genes
+
+```{r}
+all.but <- list()
+
+all.but$BRCA <- get.all.drivers(projects[which(!names(projects) == "TCGA-BRCA")])
+all.but$COAD <- get.all.drivers(projects[which(!names(projects) == "TCGA-COAD")])
+all.but$LUAD <- get.all.drivers(projects[which(!names(projects) == "TCGA-LUAD")])
+all.but$SKCM <- get.all.drivers(projects[which(!names(projects) == "TCGA-SKCM")])
+all.but$GBM <- get.all.drivers(projects[which(!names(projects) == "TCGA-GBM")])
+
+get.unique.drivers(projects$`TCGA-BRCA`)[!get.unique.drivers(projects$`TCGA-BRCA`) %in% all.but$BRCA] %>%
+  length()
+
+
+```
+
+
+Novel and shared driver mutations
+
+```{r}
+library(VennDiagram)
+
+# Helper function to display Venn diagram
+display_venn <- function(x, ...){
+  library(VennDiagram)
+  grid.newpage()
+  venn_object <- venn.diagram(x, filename = NULL, ...)
+  grid.draw(venn_object)
+}
+
+cgc.genes <- readLines("F:/Data/University/Thesis/Data/UniqueCosmicMutations.txt")
+
+setwd("F:/Data/University/Thesis/Images")
+
+pdf("BRCA_venn.pdf", 5, 5)
+display_venn(
+  list(
+    "CGC Drivers" = cgc.genes,
+    "BRCA Drivers" = get.unique.drivers(projects$`TCGA-BRCA`),
+    "Other Drivers" = all.but$BRCA
+  ),
+  fill = c("#999999", "#66ff33", "#56B4E9"),
+  print.mode = c("raw"),
+  force.unique = TRUE,
+  main = "BRCA Driver mutations",
+  main.cex = 1.5,
+  cex = 2
+  #cat.just = list(c(NA, -26), c(NA, NA), c(0.2, 0))
+)
+dev.off()
+
+pdf("LUAD_venn.pdf", 5, 5)
+display_venn(
+  list(
+    "CGC Drivers" = cgc.genes,
+    "LUAD Drivers" = get.unique.drivers(projects$`TCGA-LUAD`),
+    "Other Drivers" = all.but$LUAD
+  ),
+  fill = c("#999999", "#66ff33", "#56B4E9"),
+  print.mode = c("raw"),
+  force.unique = TRUE,
+  main = "LUAD Driver mutations",
+  main.cex = 2,
+  cex = 2,
+  cat.just = list(c(NA, -31), c(0.1, -2), c(0.8, -3))
+)
+dev.off()
+
+pdf("COAD_venn.pdf", 5, 5)
+display_venn(
+  list(
+    "CGC Drivers" = cgc.genes,
+    "COAD Drivers" = get.unique.drivers(projects$`TCGA-COAD`),
+    "Other Drivers" = all.but$COAD
+  ),
+  fill = c("#999999", "#66ff33", "#56B4E9"),
+  print.mode = c("raw"),
+  force.unique = TRUE,
+  main = "COAD Driver mutations",
+  cex = 2,
+  main.cex = 1.5,
+  #cat.just = list(c(NA, -26), c(NA, NA), c(0.2, 0))
+)
+dev.off()
+
+pdf("SKCM_venn.pdf", 5, 5)
+display_venn(
+  list(
+    "CGC Drivers" = cgc.genes,
+    "SKCM Drivers" = get.unique.drivers(projects$`TCGA-SKCM`),
+    "Other Drivers" = all.but$SKCM
+  ),
+  fill = c("#999999", "#66ff33", "#56B4E9"),
+  print.mode = c("raw"),
+  force.unique = TRUE,
+  main = "SKCM Driver mutations",
+  cex = 2,
+  main.cex = 1.5,
+  #cat.just = list(c(NA, -26), c(NA, NA), c(0.2, 0))
+)
+dev.off()
+
+pdf("GBM_venn.pdf", 5, 5)
+display_venn(
+  list(
+    "CGC Drivers" = cgc.genes,
+    "GBM Drivers" = get.unique.drivers(projects$`TCGA-GBM`),
+    "Other Drivers" = all.but$GBM
+  ),
+  fill = c("#999999", "#66ff33", "#56B4E9"),
+  print.mode = c("raw"),
+  force.unique = TRUE,
+  main = "GBM Driver mutations",
+  main.cex = 2,
+  cex = 2,
+  cat.just = list(c(NA, -31), c(0.1, -2), c(0.8, -3))
+)
+dev.off()
+```
