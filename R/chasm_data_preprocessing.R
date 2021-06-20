@@ -23,6 +23,7 @@ preprocess_CHASM_tumors <- function(projects.base.path, refactor.vars) {
 
   # Get all of the projects in the folder and read them into project lists
   # First, we generate all the paths to the files that we need for each project
+  print("Fetching files...")
   projects.names <- list.files(projects.base.path)
   projects.paths <- as.list(rep(NA, length(projects.names)))
   names(projects.paths) <- projects.names
@@ -33,8 +34,7 @@ preprocess_CHASM_tumors <- function(projects.base.path, refactor.vars) {
         projects.base.path, name, paste(name, "_clinical.csv", sep="")
       ),
       crystal = file.path(
-        projects.base.path, name, paste(".proj_", name, "_temp", sep=""),
-        paste(name, "_crystal.csv", sep="")
+        projects.base.path, name, paste(name, "_crystal.csv", sep="")
       )
     )
   }
@@ -43,14 +43,25 @@ preprocess_CHASM_tumors <- function(projects.base.path, refactor.vars) {
   names(projects) <- projects.names
 
   for (name in projects.names) {
+    print(paste("Preprocessing ", name))
     # Read the data
     project <- list(
       clinical = read.csv(projects.paths[[name]]$clinical),
       crystal = read.csv(projects.paths[[name]]$crystal)
       )
-    # Run the preprocessing functions
+    print("Renaming columns...")
+    # I need to rename the clinical id column to match the crystal
     project$clinical %>%
-      purge_useless_columns() %>%
+      rename(Identifier = "submitter_id") ->
+      project$clinical
+
+    project %>%
+      calculate_frequencies(fdr.threshold = 0.05) ->
+      project
+    # Run the preprocessing functions
+    print("Preprocessing clinical data...")
+    project$clinical %>%
+      purge_clinical_columns() %>%
       reshape_to_na() %>%
       plyr::rename(
         replace = c(frequency = "driver.freq", passenger_freq = "passenger.freq"),
@@ -58,13 +69,16 @@ preprocess_CHASM_tumors <- function(projects.base.path, refactor.vars) {
         ) %>%
       refactor_clinical_variables(refactor.vars, name) ->
       project$clinical
-
-    project$crystal %>% clean_crystal_id() -> project$crystal
+    print("Preprocessing crystal data...")
+    project$crystal %>% clean_crystal_columns() -> project$crystal
 
     project <- mapply(rename_id_labels, project)
-
+    print("Reshaping crystal. This may take a while...")
     project %>% reshape_crystal() -> project$gene_labels
-
+    print("Dropping empty columns...")
+    project$clinical %>% remove_empty_cols() -> project$clinical
+    project$crystal %>% remove_empty_cols() -> project$crystal
+    print(paste("Finished preprocessing ", name))
     projects[[name]] <- project
   }
 
@@ -73,15 +87,45 @@ preprocess_CHASM_tumors <- function(projects.base.path, refactor.vars) {
 
 ### Preprocessing functions
 
-purge_useless_columns <- function(clinical.data) {
+calculate_frequencies <- function(project, fdr.threshold) {
+  #' Takes a project and calculates the passenger and driver frequencies.
+  #'
+  #' @param project The input project
+  #' @param fdr.threshold The fdr threshold to consider. Strictly lower mutations
+  #' are considered as drivers. Applies on the tumor-specific values
+  #'
+  #' I do it in a possibly very slow fashion
+  project$crystal$is.driver <- project$crystal$CHASMplus_tspec_FDR < fdr.threshold
+  project$crystal[, c("Identifier", "is.driver")] %>%
+    group_by(Identifier) %>%
+    table() %>%
+    # For some reason we need to specify we want the method for matrices
+    # If not, the table method melts the data somewhat.
+    as.data.frame.matrix() %>%
+    rename(passenger.freq = "FALSE", driver.freq = "TRUE") %>%
+    rownames_to_column("Identifier") %>%
+    merge(project$clinical, ., by.x = "Identifier", by.y = "Identifier") ->
+    project$clinical
+
+  return(project)
+}
+
+remove_empty_cols <- function(frame) {
+  #' Remove all cols from FRAME that are completely formed by NAs.
+  return(Filter(function(x)!all(is.na(x)), frame))
+}
+
+purge_clinical_columns <- function(clinical.data) {
   #' Remove useless columns from a clinical data frame
   #'
   #' These columns come from python merging, and they hold no meaning for the
   #' analysis. They mostly hold metadata for the entries, or are just merging
   #' artefacts.
+  #'
+  #' Additionally, removes columns that are completely formed by NAs.
 
-  clinical.data %>% select(
-    !c(X, X0, demographic_id, diagnosis_id, exposure_id, updated_datetime,
+  clinical.data %>% dplyr::select(
+    !c(X, demographic_id, diagnosis_id, exposure_id, updated_datetime,
     created_datetime, state, created_datetime_x, created_datetime_y,
     state_x, state_y, updated_datetime_x, updated_datetime_y),
   ) -> clinical.data
@@ -107,14 +151,14 @@ reshape_to_na <- function(clinical.data) {
   return(clinical.data)
 }
 
-clean_crystal_id <- function(crystal.data){
-  #' Clean the IDs of a crystal, which might not be standardized.
-  #'
-  #' We expect that the ID in the crystal begins with the TCGA patient ID.
-  #' This function crops the names to just the ID (the first 12 characters).
-  crystal.data$Identifier <-
-    unlist(lapply(crystal.data$Identifier, substr, start=1, stop=12))
-  return(crystal.data)
+clean_crystal_columns <- function(crystal){
+  #' Remove useless columns from the crystal
+
+  crystal %>%
+    dplyr::select(!c(X, Unnamed..0, UID, Note)) ->
+    crystal
+
+  return(crystal)
 }
 
 rename_id_labels <- function(dframe){
@@ -137,8 +181,7 @@ reshape_crystal <- function(project){
   #'
   #' Moves from a project to a large data frame containing the presence or absence
   #' status of mutations encoded into 0 for not present and 1 for present.
-  #' Each row is a different
-  relevant <- project$crystal[,c("ID", "Renamed.HUGO", "Hugo")]
+  relevant <- project$crystal[project$crystal$is.driver, c("ID", "Renamed.HUGO", "Hugo")]
   # I stole this from stack overflow
   gene_labels <- relevant %>%
     pivot_longer(ends_with("hugo"), names_to = "genes") %>%
@@ -664,8 +707,26 @@ refactor_clinical_variables <- function(clinical.data, considered.vars, tumor.ty
   return(clinical.data)
 }
 
+get_availability <- function(clinical.data, cut_0_mut = FALSE){
+  #' Produce a named vector containing the availability of clinical data
+  #'
+  #' @param x Data as created by project.py clinical frequency function
+  #' @param cut_0_mut If true, removes patients with 0 driver mutations before
+  #' computing the availabilities.
+  #'
+  #' Note that the function expects a passenger.freq
+
+  if(cut_0_mut){
+    clinical.data <- subset(clinical.data, clinical.data$frequency != 0)
+  }
+  # Numbers holds the amount of non-na values in the dataframe
+  numbers <- colSums(!is.na(clinical.data))
+  numbers <- numbers/length(clinical.data[,1])
+  return(numbers)
+}
+
 # This is the folder containing all the projects' data, each in a separated folder.
-projects.base.path <- "F:/Data/University/Thesis/Data/CHASMplus/Projects"
+projects.base.path <- "F:/Data/University/Thesis/Data/CHASMplus/Projects_of_interest"
 
 refactor.vars <- c(
   "gender", "vital_status", "icd_10_code",
@@ -676,12 +737,106 @@ refactor.vars <- c(
   "masaoka_stage", "primary_gleason_grade", "secondary_gleason_grade"
 )
 
+all.vars <- c(
+  "gender", "vital_status", "age_at_diagnosis", "icd_10_code",
+  "prior_malignancy", "alcohol_history", "bmi", "ajcc_clinical_m",
+  "ajcc_clinical_n", "ajcc_clinical_t", "ajcc_clinical_stage",
+  "ajcc_pathologic_m", "ajcc_pathologic_n", "ajcc_pathologic_t",
+  "ajcc_pathologic_stage",
+  # I add the ID for later
+  "ID",
+  # Passenger and driver frequencies
+  "passenger.freq", "driver.freq"
+)
+
+get.unique.vars <- function(projects) {
+  pnames <- names(projects)
+  vars <- c()
+  for (name in pnames) {
+    vars <- c(vars, names(projects[[name]]$clinical))
+  }
+  # Remove the driver and passenger and ID vars
+  remove <- c("ID", "driver.freq", "passenger.freq")
+  vars <- vars[! vars %in% remove]
+
+  print(paste("Unique vars:", length(unique(vars)), "List: ", paste(unique(vars), collapse = ", ")))
+}
+
 projects <- preprocess_CHASM_tumors(projects.base.path, refactor.vars)
-# Dirname goes up one folder
-save(projects, file = file.path(dirname(projects.base.path), "preprocessed_CHASM_data.RData"))
-# Subset the data to just the tumors of interest and save it again
-reduced.projects <- projects[c("TCGA-COAD", "TCGA-BRCA", "TCGA-LUAD", "TCGA-SKCM", "TCGA-GBM")]
-save(
-  reduced.projects,
-  file = file.path(dirname(projects.base.path), "reduced_preprocessed_CHASM_data.RData")
+p.names <- names(projects)
+
+print("Saving raw preprocessed data")
+save(projects, file = file.path(dirname(projects.base.path), "raw_preprocessed_CHASM_data_2.RData"))
+
+print("vars before additonal preprocessing")
+get.unique.vars(projects)
+
+print("Starting additional data cleanup for modelling")
+print("Removing cols that are not available at 80%")
+for (name in p.names) {
+  avails <- get_availability(projects[[name]]$clinical)
+  avails[avails >= 0.8] %>% names() -> available.vars
+  projects[[name]]$clinical %>% dplyr::select(all_of(available.vars)) ->
+    projects[[name]]$clinical
+}
+
+get.unique.vars(projects)
+
+print("Removing cols that are not needed from a biological point of view")
+for (name in p.names) {
+  projects[[name]]$clinical %>% dplyr::select(any_of(all.vars)) ->
+    projects[[name]]$clinical
+}
+
+get.unique.vars(projects)
+
+print("Dropping NAs")
+for (name in p.names) {
+  len.before <- length(projects[[name]]$clinical[, 1])
+  projects[[name]]$clinical %>% na.omit() -> projects[[name]]$clinical
+  print(
+    paste(
+      "NA drop - Data retained (", name, ") After: ",
+      length(projects[[name]]$clinical[, 1]),
+      " Before: ",
+      len.before,
+      "Reduction: ",
+      round((1 - length(projects[[name]]$clinical[, 1]) / len.before) * 100, 2),
+      "%"
+    )
   )
+}
+
+print("Removing lost patients from the crystal")
+for (name in p.names) {
+  len.before <- length(projects[[name]]$crystal$ID)
+  projects[[name]]$crystal[projects[[name]]$crystal$ID %in% projects[[name]]$clinical$ID,] ->
+    projects[[name]]$crystal
+  print(
+    paste(
+      "Crystal drop - Data retained (", name, ") After: ",
+      length(projects[[name]]$crystal[, 1]),
+      " Before: ",
+      len.before,
+      "Reduction: ",
+      round((1 - length(projects[[name]]$crystal[, 1]) / len.before) * 100, 2),
+      "%"
+    )
+  )
+}
+
+print("Recalculating gene labels after dropping NAs, this might take a while")
+for (name in p.names) {
+  projects[[name]] %>% reshape_crystal() -> projects[[name]]$gene_labels
+}
+
+for (name in p.names) {
+  print(paste(
+
+  ))
+  projects[[name]]$clinical %>% names()
+}
+
+# Dirname goes up one folder
+print("Saving clean data")
+save(projects, file = file.path(dirname(projects.base.path), "preprocessed_CHASM_data_2.RData"))

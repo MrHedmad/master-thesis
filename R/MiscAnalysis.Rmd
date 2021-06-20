@@ -1,0 +1,132 @@
+---
+title: "Misc Analysis"
+output: html_notebook
+---
+
+This file will be a acatch-all for all the small things that are not worth a separate analysis for.
+
+# Preamble
+
+As per usual, we begin by loading some libraries.
+
+```{r global options, include = FALSE}
+# Do not include warnings in the output PDF
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+```{r, echo=TRUE, results='hide'}
+library(plyr) # Data shape casting (needs to be loaded before dplyr)
+library(tidyverse)
+# Tidyverse loads ggplot2, purrr, tibble, dplyr, tidyr, stringr, readr and forcats
+# This suppresses the warning that summarise makes about grouping.
+options(dplyr.summarise.inform = FALSE)
+library(reshape2) # Data melt and cast
+library(cowplot) # Margin plots made (a bit) easier
+library(gridExtra) # Stuff like grid.arrange
+
+# The docstring package is entirely optional but it allows me to print out help messages
+# as I write more code, so it's nice as I often forget what my own functions do...
+library(docstring)
+```
+
+Other packages that need to be installed (I call them sporadically without bringing them into scope):
+```{r}
+test_installed <- function (package) {
+  if(!package %in% installed.packages()) {
+    stop("Package '", package, "' is not installed.")
+  }
+}
+test_installed("ggrepel") # Add labels over scatterplots
+test_installed("jtools") # Provides easy effect plots
+```
+
+
+# Loading data
+
+Data preprocessing has already occurred. Please take a look at the `chasm_data_preprocessing.R` script in the GitHub. I only load the smaller dataset, with just the five tumor types of interest.
+
+```{r}
+load("F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data_2.Rdata")
+p.names <- names(projects)
+
+# I save the tumor type in the clinical data as an attribute, as basically every function
+# that takes the clinical data also needs it (like, for plotting)
+# This way, I don't need to pass it manually every time, but just extract it from the data
+# itself.
+for (name in p.names) {
+  attr(projects[[name]]$clinical, "project.id") <- name
+}
+```
+
+
+# ParsSNP missing annotations
+
+```{r}
+# I'm loading the test file from ParsSNP
+
+pars.annotated <- read.table(
+  "F:/Data/University/Thesis/Tools/ParsSNP/tcga_annotated.hg19_multianno.txt",
+  header = TRUE,
+  sep = "\t"
+  )
+
+# Removing the columns that are not descriptors
+
+pars.annotated.pred <- pars.annotated[, -which(names(pars.annotated) %in% c("Chr", "Start", "End", "Ref", "Alt"))]
+
+tot.nas <- sum(is.na(pars.annotated.pred))
+tot.cells <- length(pars.annotated.pred) * length(pars.annotated.pred[, 1])
+
+tot.nas/tot.cells*100
+
+```
+
+
+# CHASMplus enrichment gene lists
+
+```{r}
+unique(projects$`TCGA-BRCA`$crystal$Hugo[projects$`TCGA-BRCA`$crystal$is.driver]) -> BRCAdrivers
+
+unique(projects$`TCGA-COAD`$crystal$Hugo[projects$`TCGA-COAD`$crystal$is.driver]) -> COADdrivers
+
+unique(projects$`TCGA-LUAD`$crystal$Hugo[projects$`TCGA-LUAD`$crystal$is.driver]) -> LUADdrivers
+
+unique(projects$`TCGA-SKCM`$crystal$Hugo[projects$`TCGA-SKCM`$crystal$is.driver]) -> SKCMdrivers
+
+unique(projects$`TCGA-GBM`$crystal$Hugo[projects$`TCGA-GBM`$crystal$is.driver]) -> GBMdrivers
+
+# Just do ...drivers %>% paste(collapse = "\n) %>% cat to get the gene lists that can be pasted to EnricR
+
+```
+
+
+# Count of all passenger genes across all projects
+
+```{r}
+map(projects, function(x) {
+  return(x$crystal$Hugo[!x$crystal$is.driver])
+}) %>%
+  reduce(c) %>%
+  unique() %>%
+  length() -> pass.count
+
+# This is taken from the upset plot
+11271 / pass.count # Five tumor types
+sum(11271, 31, 215, 375, 1289, 2076) / pass.count # Four or more
+```
+
+
+Novel driver genes per tumor type
+
+```{r}
+cgc.genes <- readLines("F:/Data/University/Thesis/Data/UniqueCosmicMutations.txt")
+
+novel <- list()
+novel$BRCA <- BRCAdrivers[!BRCAdrivers %in% cgc.genes]
+novel$LUAD <- LUADdrivers[!LUADdrivers %in% cgc.genes]
+novel$COAD <- COADdrivers[!COADdrivers %in% cgc.genes]
+novel$GBM <- GBMdrivers[!GBMdrivers %in% cgc.genes]
+novel$SKCM <- SKCMdrivers[!SKCMdrivers %in% cgc.genes]
+
+print(novel)
+```

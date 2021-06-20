@@ -1,0 +1,334 @@
+---
+title: "Models Report"
+output:
+  pdf_document:
+    fig_caption: yes
+  html_notebook: default
+fig_width: 6
+fig_height: 4
+---
+
+```{r global options, include = FALSE}
+# Do not include warnings in the output PDF
+knitr::opts_chunk$set(warning=FALSE)
+```
+
+```{r, include=FALSE}
+source_rmd <- function(file, local = FALSE, ...){
+  options(knitr.duplicate.label = 'allow')
+
+  tempR <- tempfile(tmpdir = ".", fileext = ".R")
+  on.exit(unlink(tempR))
+  knitr::purl(file, output=tempR, quiet = TRUE)
+
+  envir <- globalenv()
+  source(tempR, local = envir, ...)
+}
+```
+
+```{r, fig.show='hide', include=FALSE}
+# Loading packages and the actual analysis
+# This brings everything into scope so we can write the report.
+library(knitr)
+invisible(source_rmd("FinalModels_newpreprocessing.Rmd"))
+```
+
+# Aim of the analysis
+
+We explored if and how the clinical covariates describe well the driver and passenger mutation distributions of the five tumor types considered in our project. These significant covariates, if any are found, will be potentially used to increase the variables used in a Branching Model/Monte Carlo simulation of the accumulation of driver and passenger mutations over time.
+
+We employed Generalized Linear Modelling both with a Poisson, QuasiPoisson and Negative binomial error distributions.
+We find that the Negative Binomial distribution best fits the data in most tumor types.
+
+# Methods
+
+## Data source
+
+The data used for this analysis is the output from the `chasm_data_preprocessing.R` script, in particular the data that underwent complete preprocessing. Please refer to that file for more information.
+
+Importantly, several factorial variables had levels that were too sparse to be considered useful. Therefore, several variables have had their levels simplified to better suit the analysis. Please see the preprocessing report for more information.
+
+## Variables Considered
+
+The clinical data present in the GDC data portal for each tumor type spans multiple covariates. Of these, 33 are annotated for at least one patient: synchronous_malignancy, ajcc_pathologic_stage, tumor_stage, days_to_diagnosis, tissue_or_organ_of_origin, days_to_last_follow_up, primary_diagnosis, age_at_diagnosis, prior_malignancy, year_of_diagnosis, prior_treatment, ajcc_staging_system_edition, ajcc_pathologic_t, morphology, ajcc_pathologic_n, ajcc_pathologic_m, icd_10_code, site_of_resection_or_biopsy, race, ethnicity, gender, vital_status, age_at_index, days_to_birth, year_of_birth, year_of_death, days_to_death, weight, bmi, height, cigarettes_per_day, years_smoked, pack_years_smoked. The description for these variables can be found in addendum A.
+
+As modelling requires that no missing values appear in the dataset, we further removed *a priori* all variables that were not availabe in at least 80% of all patients. This has been done in order to not lose too many patients when incomplete cases are removed. The reduced variables are 25: synchronous_malignancy, ajcc_pathologic_stage, tumor_stage, days_to_diagnosis, tissue_or_organ_of_origin, days_to_last_follow_up, primary_diagnosis, age_at_diagnosis, prior_malignancy, year_of_diagnosis, prior_treatment, ajcc_staging_system_edition, ajcc_pathologic_t, morphology, ajcc_pathologic_n, ajcc_pathologic_m, icd_10_code, site_of_resection_or_biopsy, race, ethnicity, gender, vital_status, age_at_index, days_to_birth, year_of_birth.
+
+Finally, variables that have been deemed not suitable for modelling are removed. The variables were removed due to redundacy, or probable poor biological effect (PPBE) on the mutational burden of the tumor. In specific:
+
+- synchronous_malignancy: PPBE
+- tumor_stage: Duplicate of `ajcc_pathologic_stage`
+- days_to_diagnosis: Holds the same meaning as `age_at_diagnosis`, which is included.
+- tissue_or_organ_of_origin: Holds the same meaning as `icd_10_code`, which is included.
+- days_to_last_follow_up: Holds the same meaning as `age_at_diagnosis`, which is included.
+- primary_diagnosis: Already considered in the tumor type binning.
+- year_of_diagnosis: Holds the same meaning as `age_at_diagnosis`, which is included.
+- prior_treatment: PPBE. Prior treatment shouldn't affect the evolution of future cancer cells.
+- ajcc_staging_system_edition: Not a covariate, holding only metadata.
+- morphology: PPBE. Morphology shouldn't have an effect on driver/passenger evolution.
+- site_of_resection_or_biopsy: Holds the same meaning as `icd_10_code`, which is included.
+- race: PPBE. Race and Ethicity have some effects on the allelic frequencies of some genes, but their effect on tumor progression is out of the scope of this analysis.
+- ethnicity: See `race`
+- age_at_index: Holds age metadata.
+- days_to_birth: Holds the same meaning as `age_at_diagnosis`, which is included.
+- year_of_birth: Holds the same meaning as `age_at_diagnosis`, which is included.
+
+In any case, all of these variables were taken into consideration in a preliminary analysis, and none of them were particularly useful for the models (data not shown - see the older reports).
+
+This selection leaves 9 variables for modelling: gender, vital_status, age_at_diagnosis, icd_10_code, prior_malignancy, ajcc_pathologic_m, ajcc_pathologic_n, ajcc_pathologic_t, ajcc_pathologic_stage. Note that this is an overview of all tumor types; some tumors have less available variables due to the filtering step described before.
+
+As the `ajcc` levels are several, and they are condensed in the single variable `ajcc_*_stage`, we deemed them to confound each other. Therefore, we attempted to combine the available `ajcc` staging variables (`ajcc_*_m`, `ajcc_*_t`, `ajcc_*_n`) into a single variable (`combined_ajcc`), and used that or the `ajcc_*_stage` as variable. The distribution of the points in the various levels of the `combined_ajcc` variable, however, was deemed too sparse, and too similar to the `ajcc_*_stage` variable to be useful. Therefore, the `ajcc` staging variables were not taken into consideration.
+
+The `icd_10_code` was considered as a predictor. However, its inclusion in the best-fitting models was sporadic, and the distribution of the points in each different level is often unsatisfactory (most patients were classified as "unspecified"). Therefore, this variable was also dropped from the analysis.
+
+Finally, `vital_status` and `gender` were of little importance in the preliminary analysis, and were deemed to hold too little of a biological effect on the levels of passengers and drivers, and therefore dropped.
+
+As these considerations left only a few variables for each model (age_at_diagnosis, prior_malignancy and ajcc_pathologic_stage), we also considered the driver frequency as a covariate to the passenger frequency. We expect that the driver frequency to be loosely linked to the passenger frequency.
+
+## Model types
+
+As already stated, we used `glm`s to model the passenger and driver frequencies distributions with the clinical covariates. We briefly took into consideration using Gaussian error distributions, but, as the frequencies are count data, deemed the distribution poorly capable, in the statistical sense, to model the data. We also attempted to use the Poisson error distribution, but its limitation, of the variance proportional to the mean, produced overdispersed models. Therefore, we focused only on the Quasipoisson and Negative Binomial error distributions.
+
+We modelled passenger and driver distribution separately, as R cannot perform multivariate analysis.
+
+For each tumor type, we performed exhaustive searches for the best models possible, comparing them with the AIC metric. The AICc metric was not chosen for the analysis as the numerosities of the various sample populations were deemed large enough to not require correction. For the Quasipoisson distribution, no method is currently available to measure model fit in a single value. Therefore, we limited the analysis to the manual development of a Minimum Available Model (MAM), removing one non-significant variable at each step. The MAM was deemed to be the "best-fitting" model for the Quasipoisson distribution.
+
+The exhaustive search was performed with the `glmulti` package. After generating the models, we queried the top 100 models (ranked by AIC) for variable importance metrics, revealing the variables that are most used in the top models. If the most-important variables, defined as variables with variable importance greater than 0.8, did not coincide with those included in the best model found by the exhaustive analysis, a new model was considered with only those variables. We considered this latter model to be the "best-fitting" model for both distribution.
+
+For each model, quality-of-fit measures were taken in consideration. These measures were two: the overdispersion parameters (null deviance over degrees of freedom measures) for the Poisson and Quasipoisson models, and, for all distributions, the plots generated by `autoplot`. These plots show parameters such as the normality of the residuals, and other parameters such as residuals vs fitted points, scale-location plots, and more. Model quality was assessed manually after careful inspection of the measures described.
+
+## Results
+
+We first show the distribution driver/passenger frequencies in the relevant tumor. We then point out any additional data cropping or point exclusion for each model.
+
+For each combination of tumor type and passenger or driver data, all three "best-fitting" models were compared, and only the model with highest quality (after manual curation) is showed here. If no models show satisfactory quality, no models are shown.
+
+The table shown below provides a summary of the results from the single models.
+
+```{r, fig.width=4, fig.height=9, fig.cap="Aggrate of models generates. Missing models and/or variables not included are marked with ticks."}
+knitr::include_graphics("C:/Users/Luca/Desktop/modelssummaryrot.jpg")
+```
+
+# Colon Adenocarcinoma (TCGA-COAD)
+
+For this tumor, the following variables were available: `age_at_diagnosis`, `driver.freq`, `prior_malignancy` and `ajcc_pathologic_stage`.
+
+```{r}
+plotjitter(projects$`TCGA-COAD`$clinical, outlier.alpha = 0.5)
+```
+
+## Passenger Models
+
+The above plot shows a marked clusterization for the patients in the COAD cohort based on passenger frequencies. The distributions seem to be well divided into three subpopulations: low, central and high passenger mutations.
+
+Taken together, no good quality models were produced, as the high passenger populations distorted the models too much. Therefore, we divided arbitrarily (at strictly higher than 300 passenger mutations) the high passenger patients and modelled only those. This approach increased model quality substantially for those points, with only minor outliers (probably due to hypermutators). For these high-data, the highest quality model was the Negative Binomial model, showed below.
+
+```{r}
+models$coad$highpass$negbi0 %>% best() %>% summary()
+```
+
+The two variables with highest importance were driver frequency and pathologic stage, already in the best model.
+
+Taking the rest of the population, we see a similar issue with the low points, and no models are satisfactory. Therefore, We again divided the remaining data into two sub-populations: low passengers and central passengers (low: [0, 50] passengers, central: (50, 300] passengers), and made models for each population.
+
+For the central population, the best model was the Negative Binomial model showed here:
+
+```{r}
+models$coad$centralpass$importancenegbi0 %>% summary()
+```
+
+The QuasiPoisson models were slightly overdispersed.
+
+For the low population, both the negative binomial and the quasipoisson models were of comparable quality. However, they both used the same variables, and the negative binomial models was slightly less overdispersed. Therefore, We show the latter:
+
+```{r}
+models$coad$lowpass$negbi0 %>% best() %>% summary()
+```
+
+## Driver models
+
+For driver models, the population was taken collectively, as no clusterization is obvious for this distribution. The overall best model was the Quasipoisson, as the negative binomial model is probably zero-inflated.
+
+```{r}
+models$coad$driver$qps2 %>% summary()
+```
+
+
+# Breast Invasive Carcinoma (TCGA-BRCA)
+
+For this tumor, the variables taken in consideration were: `age_at_diagnosis`, `prior_malignancy`, `ajcc_pathologic_stage` and `driver.freq`.
+
+```{r}
+plotjitter(
+  projects$`TCGA-BRCA`$clinical,
+  distribution.breaks = c(
+    red = 10, purple = 25, blue = 50, purple = 75, red = 90, darkgreen = 95
+    )
+  )
+```
+
+The distribution shows the presence of some outliers, in the high-passenger space. We therefore cropped the distribution at the 95th percentile (dark green line above) before modelling.
+
+The best passenger model was the Negative Binomial, reported below. The Quasipoisson model overestimate botht he low and high points.
+
+```{r}
+models$brca$pass$important0 %>% summary()
+```
+
+## Driver models
+
+No driver models were deemed of sufficient quality.
+
+# Lung adenocarcinoma (TCGA-LUAD)
+
+For this tumor, the available variables were `age_at_diagnosis`, `ajcc_pathologic_stage` and `driver.freq`.
+
+
+```{r}
+plotjitter(projects$`TCGA-LUAD`$clinical)
+```
+
+There seems to be only a single outlier, so the distribution was cropped at less than 5000 passengers to omit it.
+
+## Passenger Distributions
+
+The best passenger distribution was the Negative Binomial one, showed below. The Quasipoisson overestimated high passenger points.
+
+```{r}
+models$luad$pass$negbi0 %>% best() %>% summary()
+```
+
+## Driver models
+
+No models were of sufficient quality.
+
+# Skin Cutaneous Melanoma (TCGA-SKCM)
+
+For this tumor, the available variables were: `age_at_diagnosis`, `ajcc_stage`, `prior_malignancy` and `driver.freq`.
+
+```{r}
+plotjitter(projects$`TCGA-SKCM`$clinical)
+```
+
+There seems to be two outliers: the far-right points (>= than 10000 passengers), and the patient with more than 10 drivers. They were cropped out before the analysis. The new distribution:
+
+```{r}
+projects$`TCGA-SKCM`$clinical %>%
+  filter(driver.freq < 10 & passenger.freq < 10000) %>%
+  plotjitter()
+```
+
+## Passenger Models
+
+Both Quasipoisson and Negative Binomial models are only significant by the driver frequency. The best passenger model was by far the negative binomial. The Quasipoisson model is grossly overdispersed and highly overestimates the higher passenger points.
+
+```{r}
+models$skcm$pass$importancenegbi %>% summary()
+```
+
+## Driver models
+
+The only significance for the negative binomial models were the intercept. The quasipoisson models had the same problems as the passenger models above. Therefore, no models were deemed to be of sufficient quality.
+
+
+# Glioblastoma Multiforme (TCGA-GBM)
+
+For this tumor, only two variables are present: `age_at_diagnosis` and `driver.freq`.
+
+```{r}
+projects$`TCGA-GBM`$clinical %>% plotjitter()
+```
+
+There seem to be many outliers in the high passengers. For the drivers, We see just two. We crop it hard since we have just a few variables, at the 90th percentile.
+
+```{r}
+projects$`TCGA-GBM`$clinical %>%
+  filter(passenger.freq < quantile(.$passenger.freq, 0.9) & driver.freq < 6) %>%
+  plotjitter()
+```
+
+There are also a few low-passenger patients that seem outliers, but they will not be cropped at this time.
+
+## Passenger models
+
+The best passenger models were the negative binomial ones, although the quasipoisson models were of comparable (but still lower) quality. The removal of very low points (less than 20 passengers) removed some badly-fitting points on the lower end of the model, but did not impact highly the model itself.
+
+We show here the model withouth the removal of those points:
+
+```{r}
+models$gbm$pass$negbi0 %>% best() %>% summary()
+```
+
+## Driver models
+
+The driver models only used a single variable, the age. Therefore, we did not use `glmulti`. Both negative binomial and quasipoisson were of similar quality. We show both of them here:
+
+```{r}
+models$gbm$driver$negbi0 %>% summary()
+cat("\n             --------------------------------------\n")
+models$gbm$driver$qps0 %>% summary()
+```
+
+# Conclusions
+
+The modelling effort had limited success. All best models for Passenger Mutations use the Negative Binomial distribution, as the QuasiPoisson distributions were almost always overdispersed.
+
+Most best passenger models show the driver frequency to have some (although mild) effect on the passenger frequencies. The sole exception is Glioblastoma Multiforme. This is in line to the observations we already discussed on how GBM passenger frequencies distributions seem to be independent on driver frequencies. On the other hand, the tumor stage is only significant in one passenger and one driver model for COAD.
+
+The significance of the driver frequency on the passenger frequencies in most tumors could be related to the phenomenon of genomic instability as more passenger and driver mutations are gathered in the tumor cell. The very mild effect might be related to the very small variance of the driver frequency data.
+
+Attention should be given to the age variable, which is significant for many models. For two models, passenger model for low-passenger mutations in COAD, the driver model for GBM and the passenger model for LUAD, the age has actually a negative effect on passenger burden, which is generally unexpected. In any case, the effect of the age variable is limited, at about 0.015 mutations (both passenger and driver) gained or lost per year.
+This behaviour raises questions if the age parameter is actually useful to model the data.
+
+The unsatisfactory performance of most driver models is most proabably due to a phenomenon of zero inflation. To model driver frequencies, other types of zero-inflation models could be tested, such as hurdle models.
+
+In conclusion, from this analysis the only variable that emerges as possibly useful to increase the variability of branching models is the driver frequency itself, possibly increasing the rate of mutations in the genome.
+
+# Addendum A - Clinical Variable Description
+
+We include both versions of the `ajcc` staging system even though only `pathologic` versions of the same are considered in the report. This is done for completedness.
+
+* **Demographic**
+  * `age_at_index` : (int) The patient's age (in years) on the reference or anchor date date used during date obfuscation.
+  * `days_to_birth` : (int) Number of days between the date used for index and the date from a person's date of birth represented as a calculated negative number of days.
+  * `ethnicity` : (Enum) [__required__] An individual's self-described social and cultural grouping, specifically whether an individual describes themselves as Hispanic or Latino. The provided values are based on the categories defined by the U.S. Office of Management and Business and used by the U.S. Census Bureau.
+  * `gender` : (Enum) [__required__] Text designations that identify gender. Gender is described as the assemblage of properties that distinguish people on the basis of their societal roles. Self-reported.
+  * `race` : (Enum) [__required__] An arbitrary classification of a taxonomic group that is a division of a species. It usually arises as a consequence of geographical isolation within a species and is characterized by shared heredity, physical attributes and behavior, and in the case of humans, by common history, nationality, or geographic distribution. The provided values are based on the categories defined by the U.S. Office of Management and Business and used by the U.S. Census Bureau.
+  * `vital_status` : (Enum) [__required__] The survival state of the person registered on the protocol.
+  * `year_of_birth` : (int) Numeric value to represent the calendar year in which an individual was born.
+* **Diagnosis**:
+  * `age_at_diagnosis` : (int) [__required__] Age at the time of diagnosis expressed in number of days since birth.
+  * `ajcc_clinical_m` : (Enum) Extent of the distant metastasis for the cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * MX: Cannot be measured
+    * M0: Cancer has not spread to other parts of the body
+    * cM0 (i+): Minimal cancer spread (less than 0.2mm areas of cancer spread)
+    * M1/M1a/M1b/M1c: Cancer has spread to other parts of the body
+  * `ajcc_clinical_n` : (Enum) Extent of the regional lymph node involvement for the cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * NX: Cannot be measured
+    * N0: There is no cancer in nearby lymph nodes
+    * N1-4: Number and location of lymph nodes that show the presence of cancer cells. Several variations exist, such as N0 (1+/-), N11/b/c, etc...
+  * `ajcc_clinical_stage` : (Enum) Stage group determined from clinical information on the tumor (T), regional node (N) and metastases (M) and by grouping cases with similar prognosis for cancer. Stage I to IV, with several possible modifiers
+  * `ajcc_clinical_t` : (Enum) Extent of the primary cancer based on evidence obtained from clinical assessment parameters determined prior to treatment.
+    * TX: Cannot be measured
+    * T0: Cannot be found
+    * T1-4: Larger stages mean large cell mass and/or penetration into tissues
+  * `ajcc_pathologic_m` : (Enum) Code to represent the defined absence or presence of distant spread or metastases (M) to locations via vascular channels or lymphatics beyond the regional lymph nodes, using criteria established by the American Joint Committee on Cancer (AJCC). Same levels as `ajcc_clinical_m`.
+  * `ajcc_pathologic_n` : (Enum) The codes that represent the stage of cancer based on the nodes present (N stage) according to criteria based on multiple editions of the AJCC's Cancer Staging Manual. Same levels as `ajcc_clinical_n`.
+  * `ajcc_pathologic_stage` : (Enum) The extent of a cancer, especially whether the disease has spread from the original site to other parts of the body based on AJCC staging criteria. Same levels as `ajcc_clinical_stage`.
+  * `ajcc_pathologic_t` : () Code of pathological T (primary tumor) to define the size or contiguous extension of the primary tumor (T), using staging criteria from the American Joint Committee on Cancer (AJCC). Same levels as `ajcc_clinical_t`.
+  * `ajcc_staging_system_edition` : (Enum) The text term used to describe the version or edition of the American Joint Committee on Cancer Staging Handbooks, a publication by the group formed for the purpose of developing a system of staging for cancer that is acceptable to the American medical profession and is compatible with other accepted classifications. There are 8 possible editions, from 1st to 8th.
+  * `days_to_diagnosis`: (int) Number of days between the date used for index and the date the patient was diagnosed with the malignant disease.
+  * `days_to_last_follow_up` : (int) Time interval from the date of last follow up to the date of initial pathologic diagnosis, represented as a calculated number of days.
+  * `icd_10_code`: (str) Alphanumeric value used to describe the disease code from the tenth version of the International Classification of Disease (ICD-10).
+  * `morphology` : (Enum) [__required__] The third edition of the International Classification of Diseases for Oncology, published in 2000 used principally in tumor and cancer registries for coding the site (topography) and the histology (morphology) of neoplasms. The study of the structure of the cells and their arrangement to constitute tissues and, finally, the association among these to form organs. In pathology, the microscopic process of identifying normal and abnormal morphologic characteristics in tissues, by employing various cytochemical and immunocytochemical stains. A system of numbered categories for representation of data.
+  * `primary_diagnosis` : (Enum) [__required__] Text term used to describe the patient's histologic diagnosis, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `prior_malignancy` : (Enum)  The yes/no/unknown indicator used to describe the patient's history of prior cancer diagnosis.
+  * `prior_treatment` : (Enum) A yes/no/unknown/not applicable indicator related to the administration of therapeutic agents received before the body specimen was collected.
+  * `site_of_resection_or_biopsy` : (Enum) [__required__] The text term used to describe the anatomic site of origin, of the patient's malignant disease, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `synchronous_malignancy` : (Binary Enum) A yes/no/unknown indicator used to describe whether the patient had an additional malignant diagnosis at the same time the tumor used for sequencing was diagnosed. If both tumors were sequenced, both tumors would have synchronous malignancies.
+  * `tissue_or_organ_of_origin` : (Enum) [__required__] The text term used to describe the anatomic site of origin, of the patient's malignant disease, as described by the World Health Organization's (WHO) International Classification of Diseases for Oncology (ICD-O).
+  * `year_of_diagnosis` : (int) Numeric value to represent the year of an individual's initial pathologic diagnosis of cancer.
+* **Follow Up**:
+  * `bmi` : (number) A calculated numerical quantity that represents an individual's weight to height ratio.
+  * `height` : (number) The height of the patient in centimeters.
+  * `weight` : (number) The weight of the patient measured in kilograms.

@@ -1,0 +1,160 @@
+---
+title: "CHASMplus ParsSNP Big O"
+output: html_notebook
+---
+
+# Aim
+
+We attempted to estimate the Big-O notation for the CHASMplus and ParsSNP tools we used in the previous analysis. We conclude that both tools are O(n) for time, while CHASMplus is O(1) and ParsSNP is O(n) in terms of space.
+
+# Methods
+
+Mutations from a large VCF file were randomly sampled repeatedly to sample VCF files, then used as inputs for the various calls. A total of 25 different sample VCF files were generated per tool, and used as inputs for the benchmarking runs. The samples VCf files span 5 different sizes, with 5 files per size. The sizes taken in consideration are 1000, 6000, 11000, 16000 and 21000 mutations.
+
+The spatial and temporal requirements for each run were recorded by the `time` tool. Using these points, we can estimate the big-O notation for the tools, from both viewpoints.
+
+```{r}
+# Loading data and Packages
+chasm <- read.csv("F:/chasmrunoutput.csv")
+pars <- read.csv("F:/parsnprunoutput.csv")
+
+library(tidyverse)
+```
+
+Total CPU time is computed as the sum of kernel time and user time. At the same time, additional transformations are calculated to aid with plotting.
+
+```{r}
+calc.extra.vars <- function(x) {
+  x$total_time <- x$kernel_time + x$user_time
+  x$log_nr_muts <- log(x$nr_muts)
+  x$max_resident_size_mbytes <- x$max_resident_size_bytes / 1000000
+  x$filesize_mbytes <- x$filesize_bytes / 1000000
+  x$nr_kmuts <- x$nr_muts / 1000
+  return(x)
+}
+chasm <- calc.extra.vars(chasm)
+pars <- calc.extra.vars(pars)
+```
+
+First, we can see simple dotplots of the data. As filesize is almost perfectly correlated with mutation number, I'll consider the latter only.
+
+```{r}
+ggplot(chasm, aes(y = total_time, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  theme_bw() +
+  ggtitle("CHASM Time")
+
+ggplot(chasm, aes(y = max_resident_size_mbytes, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  theme_bw() +
+  ggtitle("CHASM Space")
+
+ggplot(pars, aes(y = total_time, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  theme_bw() +
+  ggtitle("ParsSNP Time")
+
+ggplot(pars, aes(y = max_resident_size_mbytes, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  theme_bw() +
+  ggtitle("ParsSNP Space")
+```
+
+It seems that all plots are of linear time, and linear space, with the exception of CHASM, which space seems to be unconditioned by input size. In order to test this hypothesis, we will generate models of the variables.
+
+```{r}
+models <- list()
+models$chasmtime <- lm(total_time ~ nr_kmuts, data = chasm)
+summary(models$chasmtime)
+models$chasmspace <- lm(max_resident_size_mbytes ~ nr_kmuts, data = chasm)
+summary(models$chasmspace)
+models$parstime <- lm(total_time ~ nr_kmuts, data = pars)
+summary(models$parstime)
+models$parsspace <- lm(max_resident_size_mbytes ~ nr_kmuts, data = pars)
+summary(models$parsspace)
+```
+
+
+The same models are computed by ggplot automatically with `stat_smooth`:
+
+```{r}
+ggplot(chasm, aes(y = total_time, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x) +
+  theme_bw() +
+  ylab("Time (s)") + xlab(bquote(Input~mutation~number~x~10^3)) +
+  ggtitle("CHASM Time")
+
+ggplot(chasm, aes(y = max_resident_size_mbytes, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x) +
+  ylab("Memory Size (MB)") + xlab(bquote(Input~mutation~number~x~10^3)) +
+  theme_bw() +
+  ggtitle("CHASM Space")
+
+ggplot(pars, aes(y = total_time, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x) +
+  ylab("Time (s)") + xlab(bquote(Input~mutation~number~x~10^3)) +
+  theme_bw() +
+  ggtitle("ParsSNP Time")
+
+ggplot(pars, aes(y = max_resident_size_mbytes, x = nr_kmuts)) +
+  stat_boxplot(aes(group=as.factor(nr_kmuts)), geom='errorbar', col = 'red') +
+  geom_point() +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x) +
+  ylab("Memory Size (MB)") + xlab(bquote(Input~mutation~number~x~10^3)) +
+  theme_bw() +
+  ggtitle("ParsSNP Space")
+
+```
+
+As it is clear, the above hypothesis is confirmed. Therefore, ParsSNP's time and space are O(n), while CHASM's space is O(1) and time is O(n). Therefore, the two tools perform well in both regards, with CHASM having a slight advantage, most probably by needing to read the data one mutation at a time.
+
+# Fusing the plots
+
+```{r}
+# Fuse the data in one dataframe
+
+chasm$tool.type <- 'CHASM'
+pars$tool.type <- 'ParsSNP'
+
+perf <- rbind(chasm, pars)
+perf$tool.type <- as.factor(perf$tool.type)
+```
+
+```{r}
+# Space graph
+pdf('F:/Data/University/Thesis/Images/ToolsComparisonSpace.pdf', 7, 4)
+ggplot(perf, aes(x = nr_kmuts, y=max_resident_size_mbytes, colour = tool.type)) +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x, geom='line') +
+  geom_point() +
+  ggpmisc::stat_poly_eq(
+    parse = TRUE, aes(label=paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = '~~~')),
+    formula = y ~ x,
+    label.y = c(0.8, 0.72)) +
+  ylab("Memory Size (MB)") + xlab(bquote(Input~mutation~number~x~10^3)) +
+  labs(colour='Tool') +
+  theme_bw() +
+  ggtitle("Space")
+dev.off()
+
+
+# Time graph
+pdf('F:/Data/University/Thesis/Images/ToolsComparisonTime.pdf', 7, 4)
+ggplot(perf, aes(x = nr_kmuts, y=total_time, colour = tool.type)) +
+  stat_smooth(method = lm, se = FALSE, formula = y ~ x, geom='line') +
+  geom_point() +
+  ggpmisc::stat_poly_eq(parse = TRUE, aes(label=paste(..eq.label.., ..rr.label.., ..p.value.label.., sep = '~~~')), formula = y ~ x) +
+  ylab("Time (s)") + xlab(bquote(Input~mutation~number~x~10^3)) + labs(colour='Tool') +
+  theme_bw() +
+  ggtitle("Time")
+dev.off()
+```

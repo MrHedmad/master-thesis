@@ -1,0 +1,195 @@
+---
+title: "CHASM/PCAWG driver Overlap"
+output: html_notebook
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+```
+
+```{r}
+load("F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data_2.Rdata")
+p.names <- names(projects)
+```
+
+# Aims
+
+The PCAWG consortium calls drivers in a particular way. How do they overlap with drivers called by CHASM?
+
+# Data
+
+The CHASM data is the usual, while the PCAWG data is from the ICGC consortium, not the TCGA. This means two things: first, the analysis is probably not that informative, as the initial data is different. Second, the analysis can only be done at the gene level, not the mutation level.
+
+# Analysis
+
+First, we load the data:
+
+```{r}
+load("F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data_2.Rdata")
+p.names <- names(projects)
+
+consortium <- read.table(
+  "F:/Data/University/Thesis/Data/TableS3_panorama_driver_mutations_ICGC_samples.controlled.tsv",
+  sep = "\t", header = TRUE)
+```
+
+We keep only non-synonimous mutations, then extract the various tumor types of interest. First, let's see the tumor types with somatic mutations.
+
+```{r}
+consortium[consortium$category == "coding",] -> cns.coding
+cns.coding$ttype %>% unique() %>% print()
+```
+
+
+We have BRCA (`Breast-AdenoCa`), SKCM (`Skin-Melanoma`), but only other CNS tumors (`CNS-Medullo`, `CNS-PiloAstro`), no COAD, and no LUAD.
+
+I compare BRCA and SKCM. The comparison is done in two metrics:
+* Genes that host driver mutations in both datasets: concordant drivers
+* Genes that were detected as drivers in the PCAWG but not by CHASM: discordant by PCAWG
+* Genes that were detected as drivers by CHASM but not by PCAWG: discordant by CHASM
+* Genes that do not host driver mutations in both datasets: concordant passengers
+
+The `concordant passenger` metric cannot be computed as I don't have the possibility to download the whole PCAWG dataset (as it's several hundred Gbs). The `discordant by PCAWG` metric is possibly biased, as we do not know if the mutations considered in the genes by CHASM were also present in the PCAWG dataset. Similarly, the same observation applied by the `discordant by PCAWG` metric.
+
+```{r}
+metrics <- list()
+```
+
+
+## BRCA
+
+```{r}
+
+make.comparisons <- function(cns.drivers, project) {
+  #' @param cns.drivers A vector with the consortium drivers
+  #' @param project A project
+  #'
+  #' @returns A list of three values, concordant drivers, discordant by PCAWG,
+  #' discordant by CHASM
+  result <- list()
+
+  chasm.drivers <- project$crystal[project$crystal$is.driver, ]
+  chasm.passengers <- project$crystal[!project$crystal$is.driver, ]
+
+  chasm.drivers <- unique(chasm.drivers$Hugo)
+  chasm.passengers <- unique(chasm.passengers$Hugo)
+
+  result$concordant.drivers <- sum(chasm.drivers %in% cns.drivers)
+  result$discordant.by.pcawg <- sum(cns.drivers %in% chasm.passengers)
+  # This would need the passenger mutations
+  result$discordant.by.chasm <- sum(!chasm.drivers %in% cns.drivers)
+
+  return(result)
+  }
+
+cns.brca <- cns.coding[cns.coding$ttype == "Breast-AdenoCa",]
+cns.brca.genes <- unique(cns.brca$gene)
+
+metrics$BRCA <- make.comparisons(cns.brca.genes, projects$`TCGA-BRCA`)
+
+cns.skcm <- cns.coding[cns.coding$ttype == "Breast-AdenoCa",]
+cns.skcm.genes <- unique(cns.skcm$gene)
+
+metrics$SKCM <- make.comparisons(cns.skcm.genes, projects$`TCGA-SKCM`)
+```
+
+```{r}
+print(metrics)
+```
+
+
+```{r}
+nonintersect <- function(x, y) {
+  shared <- intersect(x, y)
+
+  return(c(x[!shared %in% x], y[!shared %in% y]))
+}
+
+make.comparisons <- function(cns.drivers, cns.passengers, project) {
+  #' @param cns.drivers A vector with the consortium drivers
+  #' @param project A project
+  #'
+  #' @returns A list of three values, concordant drivers, discordant by PCAWG,
+  #' discordant by CHASM
+  result <- list()
+
+  chasm.drivers <- project$crystal[project$crystal$is.driver, ]
+  chasm.passengers <- project$crystal[!project$crystal$is.driver, ]
+
+  # CHASM works at the gene level, so we might mark as passenger genes that
+  # host some driver mutations. This step removes them.
+  result$details$relabeled.chasm.passengers <- NULL
+  len.bef <- length(chasm.passengers)
+  chasm.passengers <- chasm.passengers[!chasm.passengers %in% chasm.drivers]
+  if ((len.bef - lenght(chasm.passengers)) != 0) {
+    result$details$relabeled.chasm.passengers <-
+    chasm.passengers[chasm.passengers %in% chasm.drivers]
+    print(paste(
+      "Removed",
+      (len.bef - lenght(chasm.passengers)),
+      "from the CHASM passenger list as they were in the driver list."
+      ))
+  }
+
+  chasm.mutations <- c(chasm.drivers, chasm.passengers)
+
+  # See above
+  len.bef <- length(cns.passengers)
+  result$details$relabeled.cns.passengers <- NULL
+  cns.passengers <- cns.passengers[!cns.passengers %in% cns.drivers]
+  if ((len.bef - lenght(cns.passengers)) != 0) {
+    result$details$relabeled.cns.passengers <-
+    chasm.passengers[chasm.passengers %in% chasm.drivers]
+    print(paste(
+      "Removed",
+      (len.bef - lenght(cns.passengers)),
+      "from the CNS passenger list as they were in the driver list."
+      ))
+  }
+
+  cns.mutations <- c(cns.drivers, cns.passengers)
+
+  # Find the overlap of the two lists
+  unshared <- nonintersect(cns.mutations, chasm.mutations)
+  result$details$unshared.genes <- NULL
+  # Removes genes not in the overlapping list
+  if (length(unshared) != 0) {
+    result$details$unshared.genes <- unshared.genes
+    print("The two gene lists do not perfectly intersect")
+  }
+
+  result$details$cns.dropped <-
+    c(cns.drivers[cns.drivers %in% unshared], cns.passengers[cns.passengers %in% unshared])
+  if (length(result$details$cns.dropped) != 0) {
+    cns.drivers <- cns.drivers[!cns.drivers %in% unshared]
+    cns.passengers <- cns.passengers[!cns.passengers %in% unshared]
+    print(paste("Dropped", length(result$details$cns.dropped), "from the CNS lists"))
+  }
+  result$details$chasm.dropped <-
+    c(chasm.drivers[chasm.drivers %in% unshared], chasm.passengers[chasm.passengers %in% unshared])
+  if (length(result$details$chasm.dropped) != 0) {
+    chasm.drivers <- chasm.drivers[!chasm.drivers %in% unshared]
+    chasm.passengers <- chasm.passengers[!chasm.passengers %in% unshared]
+    print(paste("Dropped", length(result$details$chasm.dropped), "from the CHASM lists"))
+  }
+
+  # Now the two lists are perfectly intersectable, so we can actually run
+  # proper comparisons on them. Additionally, driver genes are not in passenger
+  # lists and vice-versa.
+
+  result$concordant.drivers <- sum(chasm.drivers %in% cns.drivers)
+  result$discordant.by.pcawg <- sum(cns.drivers %in% chasm.passengers)
+  result$discordant.by.chasm <- sum(chasm.drivers %in% cns.passengers)
+  result$concordant.passengers <- cum(chasm.passengers %in% cns.passengers)
+
+  # Percentages
+  # I need to recalculate the lengths after the filtering done above
+  chasm.len <- length(c(chasm.drivers, chasm.passengers))
+  cns.len <- length(c(chasm.drivers, chasm.passengers))
+  result$concordant.drivers <- sum(chasm.drivers %in% cns.drivers)
+  result$discordant.by.pcawg <- sum(cns.drivers %in% chasm.passengers)
+  result$discordant.by.chasm <- sum(chasm.drivers %in% cns.passengers)
+  result$concordant.passengers <- cum(chasm.passengers %in% cns.passengers)
+}
+
+```

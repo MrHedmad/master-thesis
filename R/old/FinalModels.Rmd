@@ -52,11 +52,7 @@ test_installed("MASS") # glm.nb implementation - but it masks `select` from dply
 Data preprocessing has already occurred. Please take a look at the `chasm_data_preprocessing.R` script in the GitHub. I only load the smaller dataset, with just the five tumor types of interest.
 
 ```{r}
-load("F:/Data/University/Thesis/Data/CHASMplus/reduced_preprocessed_CHASM_data.Rdata")
-# Rename the data to be more concise
-projects <- reduced.projects
-rm(reduced.projects)
-
+load("F:/Data/University/Thesis/Data/CHASMplus/preprocessed_CHASM_data_2.Rdata")
 p.names <- names(projects)
 
 # I save the tumor type in the clinical data as an attribute, as basically every function
@@ -232,8 +228,8 @@ sum_clin <- function(clinical.data){
     # Sex
     percent.reported.male = signif(extract_safe(sex, "male"), digits=4),
     # Age
-    mean.age.years = mean((-data$days_to_birth)/365.25, na.rm = TRUE),
-    sd.age.years = sd((-data$days_to_birth)/365.25, na.rm = TRUE)
+    mean.age.years = mean((-data$age_at_diagnosis)/365.25, na.rm = TRUE),
+    sd.age.years = sd((-data$age_at_diagnosis)/365.25, na.rm = TRUE)
   )
   class(obj) <- "clinical_summary"
 
