@@ -1,6 +1,8 @@
 # Master Thesis
 Code written by Luca for his Master project. All of these are tested on a machine running a Linux kernel (Windows Subsystems for Linux on Ubuntu).
 
+**NOTE: This repository is ARCHIVED, and read-only. No more updates will be provided.** The repo was frozen at the end of the master project. This means that there will be no further updates, nor security updates for pulled repositories. For more information, contact me directly. 
+
 ## Python command line tools
 [![Python Version](https://img.shields.io/badge/python-3.9-blue)](https://www.python.org/)
 
